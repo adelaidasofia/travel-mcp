@@ -24,21 +24,32 @@ Surfaces (one SYSTEM/USER pair per tool):
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# Match ALL CAPS bracket placeholders used in the seeded Profile.md template:
+# [FILL IN], [CARD NAME], [XXXX], [IATA], [NUMBER], [AIRLINE], [CHAIN], [TIER],
+# [COMPANY], [CATEGORY], [STEAK / SUSHI / ITALIAN], [OPENTABLE / RESY / TOCK],
+# [FILL IN OR NONE], [BENEFITS], [CARD], [CENTURION / PRIORITY PASS / etc.],
+# [YES/NO], etc. The pattern allows letters, spaces, slashes, dashes inside.
+_PLACEHOLDER_RE = re.compile(r"\[[A-Z][A-Z0-9 /\-_]+\]")
 
 
 def _profile_context(profile: dict[str, Any] | None) -> str:
     """Render a small slice of the master profile into a system-prompt prefix.
 
-    Best-of-best: include loyalty + cabin rules + payment strategy when the user
-    has filled in the template. If profile is missing or untouched (still has
-    [FILL IN]), return a marker so the LLM doesn't pretend to know preferences.
+    Best-of-best: include the body when the user has filled in the template.
+    If profile is missing OR still mostly placeholder, return a short marker so
+    the LLM doesn't bloat its context with empty fields AND doesn't pretend to
+    know preferences. Threshold (5) is well below the template's ~50 placeholders
+    but high enough that a partially-filled profile still passes through.
     """
     if not profile:
         return "Traveler profile: NOT AVAILABLE. Treat preferences as unknown; ask for missing fields when answering."
     body = profile.get("body", "") or ""
-    if "[FILL IN]" in body and body.count("[FILL IN]") > 10:
-        return "Traveler profile: PRESENT but mostly placeholder ([FILL IN] markers). Use what is filled in; flag the rest as unknown."
+    placeholder_count = len(_PLACEHOLDER_RE.findall(body))
+    if placeholder_count > 5:
+        return f"Traveler profile: PRESENT but mostly placeholder ({placeholder_count} unfilled bracket markers). Treat preferences as unknown; flag every assumption."
     # Pass through the entire body — it is the traveler's source of truth.
     return f"Traveler profile (source of truth — defer to these preferences):\n\n{body}"
 

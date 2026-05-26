@@ -32,7 +32,10 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_MODEL = os.environ.get("TRAVEL_MCP_MODEL", "claude-sonnet-4-6")
-CLI_TIMEOUT_SECONDS = int(os.environ.get("TRAVEL_MCP_CLI_TIMEOUT", "180"))
+# 600s ceiling: claude -p cold-start + reasoning on analyzer-class prompts
+# routinely lands 90-300s; 180s was hitting the timeout on real BOG→JFK
+# analyze_route calls. Env override per surface if a tool needs less / more.
+CLI_TIMEOUT_SECONDS = int(os.environ.get("TRAVEL_MCP_CLI_TIMEOUT", "600"))
 
 
 @dataclass

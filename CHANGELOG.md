@@ -4,6 +4,17 @@ All notable changes to travel-mcp will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-05-26
+
+### Fixed
+
+- **LLM-router CLI timeout bumped 180s → 600s.** Real `analyze_route` calls (BOG→JFK, sonnet-4-6) routinely land 200-300s end-to-end via `claude -p` cold-start + reasoning. The 180s default in v0.1.0 hit the timeout on the first live invocation. Env override `TRAVEL_MCP_CLI_TIMEOUT` still honored.
+- **Placeholder-profile detection now catches ALL bracket markers**, not just `[FILL IN]`. The seeded `Profile.md` template has ~50 placeholders across `[FILL IN]`, `[CARD NAME]`, `[XXXX]`, `[IATA]`, `[NUMBER]`, `[AIRLINE]`, `[CHAIN]`, `[TIER]`, `[COMPANY]`, etc. v0.1.0 counted only `[FILL IN]` (~8 in template) and missed the threshold, passing the full empty template into every LLM system block. v0.1.1 regex-matches `\[[A-Z][A-Z0-9 /\-_]+\]` and collapses to a 132-char marker when >5 placeholders remain. Saves ~30K context tokens per analyzer call on a fresh-template profile.
+
+### Caught by
+
+End-to-end self-test in the same session as v0.1.0 ship. `mcp__travel__analyze_route(BOG, JFK, ...)` timed out at 180s; out-of-band test with v0.1.1 changes returned 9,330 chars in 228.5s via `auth=max-subscription`. Verification-before-completion gate per CLAUDE.md auto-mode rule (verification gates never skipped, even in auto-mode).
+
 ## [0.1.0] — 2026-05-26
 
 ### Added
