@@ -19,9 +19,10 @@ import json
 import os
 import re
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 AUDIT_PATH = Path(os.environ.get("TRAVEL_MCP_AUDIT_PATH") or
                   os.path.expanduser("~/.claude/travel-mcp/audit.log.jsonl"))

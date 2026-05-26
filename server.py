@@ -29,12 +29,12 @@ ravinahp/flights-mcp, etc.).
 from __future__ import annotations
 
 import os
+import profile as profile_mod
 from typing import Any
 
 from fastmcp import FastMCP
 
 import audit
-import profile as profile_mod
 import prompts
 import router
 import validators as V

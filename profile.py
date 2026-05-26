@@ -304,10 +304,7 @@ def read_companion(name: str) -> dict[str, Any]:
 def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None) -> dict[str, Any]:
     p = _companion_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
-    if p.exists():
-        post = frontmatter.load(str(p))
-    else:
-        post = frontmatter.Post(content=body or "")
+    post = frontmatter.load(str(p)) if p.exists() else frontmatter.Post(content=body or "")
     post.metadata["type"] = "travel_companion"
     post.metadata["name"] = name
     post.metadata.update({k: v for k, v in fields.items() if v is not None})

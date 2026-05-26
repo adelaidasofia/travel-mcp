@@ -153,7 +153,7 @@ def main() -> int:
     print("\n".join(all_logs))
     print(f"\nEvalGate: {tool_count_passed}/{tool_count_total} fixtures passed "
           f"({fixture_count} total)")
-    print(f"OK" if overall_ok else "FAIL")
+    print("OK" if overall_ok else "FAIL")
     return 0 if overall_ok else 1
 
 

@@ -18,9 +18,7 @@ Covers:
 from __future__ import annotations
 
 import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -46,7 +44,7 @@ def _isolate_env(tmp_path, monkeypatch):
 
 
 def test_imports_clean():
-    import audit, profile, router, prompts, validators, server  # noqa: F401
+    import server  # noqa: F401
 
 
 def test_validate_iata_accepts_valid():
@@ -130,7 +128,9 @@ def test_audit_sanitize_strips_bearer_and_token():
 
 def test_audit_record_writes_jsonl(tmp_path, monkeypatch):
     monkeypatch.setenv("TRAVEL_MCP_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
-    import importlib, audit
+    import importlib
+
+    import audit
     importlib.reload(audit)
     audit.record("test_tool", execution_time_ms=42, io={"input": {"x": 1}, "output": {"y": 2}},
                  token_usage={"prompt": 10, "completion": 5, "cache_read": 0, "cache_creation": 0},
@@ -231,14 +231,17 @@ def test_server_tool_registry_has_all_21():
     # the FunctionTool wrapper exposes the underlying signature.
     for name in expected:
         obj = getattr(server, name)
-        assert callable(obj) or hasattr(obj, "fn") or hasattr(obj, "__call__"), (
+        assert callable(obj) or hasattr(obj, "fn"), (
             f"{name} is not callable: {type(obj)}"
         )
 
 
 def test_healthcheck_without_vault_env(monkeypatch):
     monkeypatch.delenv("TRAVEL_MCP_VAULT_PATH", raising=False)
-    import importlib, server, profile
+    import importlib
+    import profile
+
+    import server
     importlib.reload(profile)
     importlib.reload(server)
     result = server.healthcheck.fn() if hasattr(server.healthcheck, "fn") else None
@@ -254,7 +257,8 @@ def test_healthcheck_without_vault_env(monkeypatch):
 
 
 def test_analyze_route_rejects_non_iata():
-    import server, validators
+    import server
+    import validators
     fn = getattr(server.analyze_route, "fn", server.analyze_route)
     with pytest.raises(validators.ValidationError):
         fn(origin="São Paulo", destination="JFK", dates="2026-12-15..2026-12-20")

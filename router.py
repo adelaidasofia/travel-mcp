@@ -31,7 +31,6 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-
 DEFAULT_MODEL = os.environ.get("TRAVEL_MCP_MODEL", "claude-sonnet-4-6")
 CLI_TIMEOUT_SECONDS = int(os.environ.get("TRAVEL_MCP_CLI_TIMEOUT", "180"))
 
