@@ -1,0 +1,12 @@
+- name: default
+  tool: pricing_reality_check
+  input: {}
+  n_samples: 3
+  expected_substrings_any_case:
+    - confirmed
+    - plausible
+    - myth
+    - revenue management
+  expected_absent_case_sensitive:
+    - PRIVATE_TRAVELER_FIRST_NAME
+    - PRIVATE_COMPANY_CODENAME

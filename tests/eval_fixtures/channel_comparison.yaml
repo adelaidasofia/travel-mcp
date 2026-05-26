@@ -1,0 +1,15 @@
+- name: bog_jfk_business
+  tool: channel_comparison
+  input:
+    origin: BOG
+    destination: JFK
+    dates: "2026-12-15..2026-12-22"
+    cabin: business
+  n_samples: 3
+  expected_substrings_any_case:
+    - airline direct
+    - decision rule
+    - hidden
+  expected_absent_case_sensitive:
+    - PRIVATE_TRAVELER_FIRST_NAME
+    - PRIVATE_COMPANY_CODENAME

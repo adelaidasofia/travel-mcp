@@ -1,0 +1,15 @@
+- name: tokyo_one_week
+  tool: emergency_travel_card
+  input:
+    destination: Tokyo, Japan
+    dates: "2026-12-15..2026-12-22"
+    hotel: Park Hyatt Tokyo
+  n_samples: 3
+  expected_substrings_any_case:
+    - embassy
+    - hospital
+    - if my flight is cancelled
+    - hotel address
+  expected_absent_case_sensitive:
+    - PRIVATE_TRAVELER_FIRST_NAME
+    - PRIVATE_COMPANY_CODENAME

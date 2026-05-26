@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.local
+admin.env
+audit.log.jsonl
+*.swp
+.DS_Store
+dist/
+build/
+
+# Local-only eval fixtures (override placeholders with real private terms).
+tests/eval_fixtures.local/
+tests/eval_fixtures/*.local.yaml

@@ -1,0 +1,15 @@
+- name: bog_jfk_leisure_december
+  tool: timing_sweet_spot
+  input:
+    origin: BOG
+    destination: JFK
+    trip_type: leisure
+    target_month: December
+  n_samples: 3
+  expected_substrings_any_case:
+    - booking window
+    - day of week
+    - action plan
+  expected_absent_case_sensitive:
+    - PRIVATE_TRAVELER_FIRST_NAME
+    - PRIVATE_COMPANY_CODENAME

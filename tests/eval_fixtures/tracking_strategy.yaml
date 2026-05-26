@@ -1,0 +1,18 @@
+- name: bog_jfk_economy_8_weeks_out
+  tool: tracking_strategy
+  input:
+    origin: BOG
+    destination: JFK
+    dates: "2026-12-15..2026-12-22"
+    cabin: economy
+    budget_ceiling: 600
+    weeks_out: 8
+  n_samples: 3
+  expected_substrings_any_case:
+    - tools
+    - cadence
+    - decision rule
+    - worked example
+  expected_absent_case_sensitive:
+    - PRIVATE_TRAVELER_FIRST_NAME
+    - PRIVATE_COMPANY_CODENAME
