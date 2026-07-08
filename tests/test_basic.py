@@ -268,3 +268,62 @@ def test_router_raises_when_no_auth_path():
     import router
     with pytest.raises(RuntimeError, match="auth"):
         router.call_claude_text(system="s", user="u")
+
+
+# ---------------------------------------------------------------------------
+# Billing-leak gate: a Max CLI rate-limit must fail loud, NEVER spill to the
+# paid Anthropic API. Bug class SILENT-PAID-FALLBACK-ON-RATE-LIMIT.
+# ---------------------------------------------------------------------------
+class _Proc:
+    def __init__(self, stdout="", stderr="", returncode=0):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def test_cli_ratelimit_banner_raises_not_returned(monkeypatch):
+    """A rate-limit banner on stdout raises RateLimited (never served as text)."""
+    import router
+    monkeypatch.setattr(
+        router.subprocess,
+        "run",
+        lambda *a, **k: _Proc(
+            stdout="You've hit your session limit · resets 11:50pm", returncode=1
+        ),
+    )
+    with pytest.raises(router.RateLimited):
+        router._call_via_cli(system="s", user="u", model="claude-sonnet-4-6")
+
+
+def test_ratelimit_never_spills_to_paid_api(monkeypatch):
+    """NEGATIVE CONTROL: a CLI rate-limit must NOT reach the paid API even when
+    ANTHROPIC_API_KEY is set."""
+    import router
+
+    def _raise_rl(**k):
+        raise router.RateLimited("max capped")
+
+    monkeypatch.setattr(router, "_cli_available", lambda: True)
+    monkeypatch.setattr(router, "_prefer_api_key", lambda: False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-be-used")
+    monkeypatch.setattr(router, "_call_via_cli", _raise_rl)
+    monkeypatch.setattr(
+        router,
+        "_call_via_api",
+        lambda **k: pytest.fail("paid API must not be called on a rate-limit"),
+    )
+    with pytest.raises(router.RateLimited):
+        router.call_claude_text(system="s", user="u")
+
+
+def test_normal_cli_answer_still_returned(monkeypatch):
+    """POSITIVE CONTROL: a real answer (no rate-limit markers) is returned."""
+    import router
+    monkeypatch.setattr(
+        router.subprocess,
+        "run",
+        lambda *a, **k: _Proc(stdout="Fly BOG-JFK on Avianca, book 6 weeks out.", returncode=0),
+    )
+    result = router._call_via_cli(system="s", user="u", model="claude-sonnet-4-6")
+    assert result.auth == "max-subscription"
+    assert "Avianca" in result.text

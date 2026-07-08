@@ -32,6 +32,24 @@ from dataclasses import dataclass
 from typing import Any
 
 DEFAULT_MODEL = os.environ.get("TRAVEL_MCP_MODEL", "claude-sonnet-4-6")
+
+
+class RateLimited(RuntimeError):
+    """The Max CLI hit a rate-limit / usage cap. Must fail loud, NEVER spill to
+    the paid API — silently re-billing a rate-limited call is the billing-leak
+    bug class (mirrors _claude_router.py's RateLimitExhausted)."""
+
+
+# Tight markers so a legitimate travel answer never trips fail-loud.
+_RATELIMIT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "usage limit",
+    "session limit",
+    "weekly limit",
+    "5-hour limit",
+    "hit your limit",
+)
 # 600s ceiling: claude -p cold-start + reasoning on analyzer-class prompts
 # routinely lands 90-300s; 180s was hitting the timeout on real BOG→JFK
 # analyze_route calls. Env override per surface if a tool needs less / more.
@@ -96,6 +114,9 @@ def call_claude_text(
             cli_result = _call_via_cli(system=system, user=user, model=chosen_model)
             cli_result.elapsed_ms = int((time.perf_counter() - start) * 1000)
             return cli_result
+        except RateLimited:
+            # Max cap hit — fail loud, never spill to the paid API.
+            raise
         except RuntimeError:
             # CLI path failed; fall through to API key only if available.
             if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -132,6 +153,12 @@ def _call_via_cli(*, system: str, user: str, model: str) -> RouterResult:
     )
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
+    low = stdout.lower()
+    if any(marker in low for marker in _RATELIMIT_MARKERS):
+        # A rate-limit / usage-cap banner printed to stdout is NOT an answer and
+        # must NOT trigger the paid API fallback. Fail loud so the caller sees
+        # the cap instead of silently re-billing the request.
+        raise RateLimited(f"max-subscription rate-limited: {stdout[:200]}")
     if not stdout or len(stdout) < 20:
         msg = stderr or "claude CLI returned empty stdout"
         raise RuntimeError(f"max-subscription path failed: {msg[:400]}")
