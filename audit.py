@@ -108,9 +108,20 @@ _REDACTED = "***REDACTED***"
 # "Passport-number-AN7734512", where every separator has collapsed to a hyphen.
 _DOC_LABEL_RE = re.compile(
     r"(?i)\b(passports?|pasaportes?|c[ée]dulas?|dni|nit|curp|rfc|ssn|"
-    r"social\s+security|national\s+id|tax\s+id|documento)\b"
+    r"social\s+security|national\s+id|tax\s+id|documentos?|"
+    r"(?:travel\s+|identity\s+|government\s+)?document|"
+    r"id|identification|identificaci[óo]n|reisepass|passeport)\b"
 )
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{3,}")
+
+#: Labels that OWN their number. A booking reference and a passport number are
+#: indistinguishable by shape, so shape can never separate them -- but the noun
+#: immediately in front of the number can. When one of these sits closer to the
+#: token than the document label does, the number belongs to the itinerary.
+_ITINERARY_LABEL_RE = re.compile(
+    r"(?i)\b(booking|confirmation|confirm|reference|ref|record\s+locator|pnr|"
+    r"flight|ticket|reserva|localizador|orden|order)\b"
+)
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}\S*)?$")
 
 #: A flight number carries at most 4 digits (AA1234); a PNR carries few. Real
@@ -145,8 +156,18 @@ def _looks_like_document_number(token: str) -> bool:
     if not token or _ISO_DATE_RE.match(token):
         return False
     groups = [g for g in re.split(r"[.\-]", token) if g]
-    if any(sum(c.isdigit() for c in g) >= _MIN_DIGITS_IN_GROUP for g in groups):
-        return True
+    for g in groups:
+        digits = sum(c.isdigit() for c in g)
+        # An ALPHANUMERIC document number (AN7734512) is unmistakable at 5
+        # digits. A PURE number must be long, because short bare numbers are
+        # room numbers, quantities and Colombian-peso fees -- "Passport office
+        # room 12345" and "Passport fee 150000 COP" are ordinary travel notes,
+        # while a real national ID runs to 8+ digits.
+        if any(c.isalpha() for c in g):
+            if digits >= _MIN_DIGITS_IN_GROUP:
+                return True
+        elif digits >= _MIN_DIGITS_TOTAL_GROUPED:
+            return True
     # Grouped form: short groups, long total, and made only of digit groups
     # (so "fee USD 130-165" -- two groups, 6 digits -- stays below the bar).
     if len(groups) >= 3 and all(g.isdigit() for g in groups):
@@ -154,13 +175,12 @@ def _looks_like_document_number(token: str) -> bool:
     return False
 
 
-#: In STRICT mode a document number must be the label's own value: at most one
-#: filler word may sit between them. That admits "Passport number: X" and the
-#: slugified "Passport-number-X", while leaving "Bring passport; booking ref
-#: ABC123456" and "Passport office room 12345" alone -- two filler words mean
-#: the number belongs to a different noun.
-_MAX_FILLER_WORDS = 1
-_FILLER_RE = re.compile(r"^[\s:=#.\-]*([A-Za-z]{1,12})(?=[\s:=#.\-])")
+#: How many filler words may sit between a document label and its number.
+#: Wide enough for "Cedula de ciudadania: X" and "Passport document number: X";
+#: token SHAPE, not this count, is what keeps "Passport office room 12345" and
+#: "Passport fee 150000 COP" writable.
+_MAX_FILLER_WORDS = 3
+_FILLER_RE = re.compile(r"^[\s:=#.\-'’()\[\]]*([A-Za-zÀ-ſ]{1,15})(?=[\s:=#.\-'’()\[\]]|$)")
 
 
 def _find_document_spans(text: str, *, strict: bool = False) -> list[tuple[int, int]]:
@@ -178,13 +198,18 @@ def _find_document_spans(text: str, *, strict: bool = False) -> list[tuple[int, 
         for tok in _TOKEN_RE.finditer(window):
             if not _looks_like_document_number(tok.group(0)):
                 continue
+            # Whichever label sits CLOSEST to the number owns it.
+            gap_text = window[:tok.start()]
+            it = list(_ITINERARY_LABEL_RE.finditer(gap_text))
+            if it and not _DOC_LABEL_RE.search(gap_text[it[-1].end():]):
+                continue
             if strict:
                 gap = window[:tok.start()]
                 fillers = 0
                 while (m := _FILLER_RE.match(gap)):
                     fillers += 1
                     gap = gap[m.end():]
-                if fillers > _MAX_FILLER_WORDS or gap.strip(" :=#.-\t"):
+                if fillers > _MAX_FILLER_WORDS or gap.strip(" :=#.-\t\n\r'’()[]"):
                     continue
             spans.append((label.end() + tok.start(), label.end() + tok.end()))
     return spans

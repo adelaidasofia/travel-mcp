@@ -384,6 +384,13 @@ def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None)
                 if audit.is_document_number_key(k)]
     for k in stripped:
         post.metadata.pop(k, None)
+    # The BODY needs the same treatment. Reporting an empty list while a legacy
+    # number still sits in the prose is worse than reporting nothing: a caller
+    # reading removed_identity_fields gets an affirmative all-clear on a file
+    # that still contains the number.
+    if audit.contains_labelled_document(post.content):
+        post.content = audit.redact_labelled_documents(post.content)
+        stripped.append("body")
     post.metadata["last_updated"] = time.strftime("%Y-%m-%d")
     if body is not None:
         post.content = body

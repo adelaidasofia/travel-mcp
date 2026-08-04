@@ -239,7 +239,13 @@ def _plausible_arg(param: str, annotation: str) -> object:
     """A value shaped well enough to get past input validation."""
     p = param.lower()
     if "slug" in p:                       return "test-trip"
+    # These are date-shaped and previously got "test", so the call died in
+    # validators.py and the injection never reached the write boundary.
+    if p in ("window_start", "arrive", "start"):   return "2026-10-01"
+    if p in ("window_end", "depart", "end"):       return "2026-10-05"
     if "date" in p or "expiry" in p:      return "2026-10-01"
+    if p == "state":                      return "allowed"
+    if p == "status":                     return "planned"
     if p in ("origin", "destination_iata", "iata"): return "LHR"
     if "country" in p:                    return "Japan"
     if "city" in p or "place" in p:       return "Tokyo"
@@ -484,3 +490,73 @@ def test_cyclic_payload_does_not_crash_or_drop_the_audit_line(travel_vault):
     with audit.timed("t_cycle", input_payload={"d": d}) as ctx:
         ctx["output"] = {"ok": True}
     assert "t_cycle" in (travel_vault / "audit.jsonl").read_text(encoding="utf-8")
+
+
+
+# --------------------------------------------------------------------------
+# 9. Phrasing corpus. Every form below was found by adversarial review writing
+#    a real file to disk, or wrongly refused / corrupted. Pinned so the next
+#    threshold change cannot silently trade one direction for the other.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Passport document number: AN7734512",     # two filler words
+    "Passport ID number: BB1122334",
+    "Passport's number: CC5566778",            # possessive
+    "Pasaporte numero: DD9988776",
+    "Pasaporte n\u00famero: DD9988776",            # accented filler
+    "C\u00e9dula de ciudadan\u00eda: 1.020.123.456",     # canonical Colombian form
+    "Passport identification: EE4433221",
+    "Passport (number) FF7766554",             # parenthesised filler
+    "Passport number:\nGG1231234",             # label and value on separate lines
+    "Passport\nnumber\nAN7734512",
+    "Document number: AN7734512",
+    "ID number: AN7734512",
+    "Travel document: AN7734512",
+    "Cedula: 1.020.123.456",
+])
+def test_every_known_disclosure_phrasing_is_refused(travel_vault, text):
+    import profile
+
+    profile.ensure_dirs()
+    with pytest.raises(profile.IdentityDocumentRejected):
+        profile.save_trip("phrasing", "summary", text)
+
+
+@pytest.mark.parametrize("text", [
+    "Bring passport; booking ref ABC123456",       # itinerary label owns the number
+    "cedula copy for hotel, confirmation ABC123456",
+    "Passport ok, confirmation XY123456",
+    "passport done, booking 987654",
+    "Passport check at gate, flight AA1234",
+    "Passport ready. PNR X7K2QP",
+    "passport expires 2029-04-12",
+    "Japan: passport 90-day validity rule applies",
+    "Renew passport - fee USD 130-165",
+    "national id required, see form DS-11",
+])
+def test_legitimate_strings_survive_both_sinks(travel_vault, text):
+    """Neither refused at the vault nor corrupted in the log."""
+    import audit
+    import profile
+
+    profile.ensure_dirs()
+    profile.save_trip("legit", "summary", text)          # must not raise
+    assert "REDACTED" not in audit.sanitize_error(text)
+
+
+def test_legacy_number_in_body_is_reported_not_silently_kept(travel_vault):
+    import profile
+
+    profile.ensure_dirs()
+    path = profile._companion_path("Legacy Body")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: travel_companion\nname: Legacy Body\n---\n\n"
+        f"Passport number: {FAKE_PASSPORT}\n", encoding="utf-8")
+
+    result = profile.upsert_companion("Legacy Body", {"ktn": "TT1234567"})
+
+    assert FAKE_PASSPORT not in path.read_text(encoding="utf-8")
+    assert "body" in result["removed_identity_fields"], (
+        "reported an all-clear while the number was still on disk")
