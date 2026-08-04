@@ -9,7 +9,7 @@ A Model Context Protocol server that turns Claude into a strategic flight + trip
 
 ## What it does
 
-**21 tools across 4 surfaces:**
+**42 tools across 6 surfaces:**
 
 ### Profile (vault-backed, no LLM)
 - `healthcheck` — verify config, auto-create folder tree, seed Profile.md
@@ -37,6 +37,34 @@ A Model Context Protocol server that turns Claude into a strategic flight + trip
 - `compare_trips` — side-by-side trip A vs B with recommendation + tiebreaker
 - `post_trip_review` — spending breakdown + points earned + profile-update suggestions
 - `price_drop_analysis` — post-booking fare-drop monitor with carrier-specific rebooking steps
+
+### Itinerary model (vault-backed, no LLM)
+
+A trip is ORDERED SEGMENTS, not prose. These tools are deterministic and offline — no LLM call, no token cost.
+
+**Structured trips**
+- `save_itinerary` / `get_itinerary` / `list_itineraries` — a trip is segments of `{city, country, arrive, depart, status, scope}`; `status` ∈ locked | planned | candidate, `scope` ∈ personal | company
+- `add_itinerary_segment` — append one segment, re-sort by arrival, recompute windows
+- `itinerary_open_windows` — the unallocated stretches. A segment occupies both its arrive and depart day, so a window runs from (previous depart + 1) to (next arrive − 1). A `candidate` is a proposal to fill a window, so by default it does not consume one.
+- `plan_window_packing` — how many places fit per window: `k_max = floor((L + overhead) / (dwell + overhead))`
+
+**Dwell time**
+- `dwell_time_estimate` — `days = ceil(H × completionism / discretionary_hours)`, floor of 2. Always returned as a RANGE with a confidence, never a point value: H is an estimate, so a single number would be false precision.
+
+**Preference profile v2**
+- `get_preference_profile` / `upsert_place_preference` — a place carries MULTIPLE relationships at once (for-a-person, love-the-place, never-mind-it, been-done, want-to-go), never exactly one
+- `set_travel_dials` — novelty and depth are INDEPENDENT dials; wanting new places and wanting them properly is not a contradiction, so both may be 1.0
+- `set_time_budget` — daily discretionary hours plus an optional work-hours block
+- `upsert_preference_seed` / `resolve_place_preference` — standing seeds apply BY REFERENCE, so editing a seed updates every place pointing at it
+
+**Been-there ledger**
+- `record_country_inference` / `confirm_country_visit` / `get_been_there_ledger` — per-country provenance (inferred | confirmed | asked | unknown). An inference the traveler did not confirm counts as NOT visited and is committed as such immediately; it is never left pending and never counted as a visit. The rule is re-applied on load, so a hand-edited file cannot forge a visit.
+
+**Entry eligibility**
+- `set_entry_eligibility` / `get_entry_eligibility` / `filter_proposable_countries` — three states (verified-eligible | verified-ineligible | unchecked), each verified state carrying a source and an as-of date. Only verified-eligible may be PROPOSED; `unchecked` is not a soft yes. A UI may still DISPLAY unchecked as unchecked, because hiding an unknown makes it look like a no.
+
+**Prerequisites**
+- `save_trip_prerequisites` / `prerequisite_schedule` — visas, vaccinations and permits scheduled BACKWARD from departure with lead times and hard cutoffs. A dependency cycle or unknown key is rejected at write time, so an unschedulable graph never lands on disk.
 
 ## What it does NOT do
 

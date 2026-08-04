@@ -1,6 +1,6 @@
-"""travel-mcp v0.1.0 — Analytical travel-planner MCP.
+"""travel-mcp — Analytical travel-planner MCP.
 
-21 tools across four surfaces:
+42 tools across six surfaces:
 
   PROFILE (6)            — healthcheck, get/update travel profile, companion CRUD
   PERSISTENCE (3)        — save/list/get trip plan
@@ -9,6 +9,12 @@
                             tracking_strategy
   PDF-DERIVED (5)        — trip_prep_brief, emergency_travel_card, compare_trips,
                             post_trip_review, price_drop_analysis
+  ITINERARY MODEL (21)   — structured trips (ordered segments), preference profile v2,
+                            been-there ledger with provenance, dwell-time ranges,
+                            entry-eligibility gate, backward-scheduled prerequisites
+
+The itinerary surface is DATA, not prose: it does not call an LLM, so those
+tools are deterministic, offline and free. The analyzers remain LLM-backed.
 
 Safety model:
   - NO draft+confirm (this MCP is analysis, not destructive prod mutation).
@@ -35,6 +41,12 @@ from typing import Any
 from fastmcp import FastMCP
 
 import audit
+import dwell as dwell_mod
+import eligibility as eligibility_mod
+import itinerary as itinerary_mod
+import ledger as ledger_mod
+import preferences as preferences_mod
+import prereqs as prereqs_mod
 import prompts
 import router
 import validators as V
@@ -572,6 +584,502 @@ def price_drop_analysis(
         system=prompts.PRICE_DROP_ANALYSIS_SYSTEM,
         user=prompts.render_price_drop_analysis_user(carrier, flight_number, dep, cabin_v, paid_price),
     )
+
+
+# ============================== ITINERARY MODEL ==============================
+# Deterministic, offline, no LLM call. A trip is ordered segments; everything
+# below is downstream of that one primitive.
+
+@mcp.tool()
+def save_itinerary(
+    slug: str,
+    title: str,
+    window_start: str,
+    window_end: str,
+    segments: list[dict[str, Any]] | None = None,
+    notes: str | None = None,
+    scope: str = "personal",
+) -> dict[str, Any]:
+    """Create or replace a structured itinerary at 🧳 Travel/Itineraries/<slug>.md.
+
+    A trip is ORDERED SEGMENTS inside a departure..return window. Each segment is
+    {city, country, arrive, depart, status, scope}:
+
+      status  locked | planned | candidate   (candidate = a proposal to fill a window)
+      scope   personal | company
+
+    Segments are sorted by arrival on write, so pass them in any order. Returns the
+    stored trip plus its open windows and any overlap conflicts.
+    """
+    trip = itinerary_mod.Trip.build(
+        slug=slug, title=title, window_start=window_start, window_end=window_end,
+        segments=segments or [], notes=notes, scope=scope,
+    )
+    with audit.timed("save_itinerary",
+                     input_payload={"slug": trip.slug, "window": [trip.window_start, trip.window_end],
+                                    "segments": len(trip.segments)}) as ctx:
+        written = itinerary_mod.save(trip)
+        out = {
+            **written,
+            "trip": trip.to_dict(),
+            "open_windows": [w.to_dict() for w in trip.open_windows()],
+            "conflicts": trip.conflicts(),
+            "out_of_window": trip.out_of_window(),
+        }
+        ctx["output"] = {"path": written["path"], "segments": len(trip.segments)}
+        return out
+
+
+@mcp.tool()
+def get_itinerary(slug: str) -> dict[str, Any]:
+    """Read one structured itinerary, with its open windows and conflicts."""
+    with audit.timed("get_itinerary", input_payload={"slug": slug}) as ctx:
+        trip = itinerary_mod.load(slug)
+        out = {
+            "trip": trip.to_dict(),
+            "open_windows": [w.to_dict() for w in trip.open_windows()],
+            "conflicts": trip.conflicts(),
+            "out_of_window": trip.out_of_window(),
+        }
+        ctx["output"] = {"slug": trip.slug, "segments": len(trip.segments)}
+        return out
+
+
+@mcp.tool()
+def list_itineraries() -> dict[str, Any]:
+    """List every structured itinerary with its segment + open-window counts."""
+    with audit.timed("list_itineraries", input_payload={}) as ctx:
+        items = itinerary_mod.list_all()
+        ctx["output"] = {"count": len(items)}
+        return {"count": len(items), "itineraries": items}
+
+
+@mcp.tool()
+def add_itinerary_segment(
+    slug: str,
+    city: str,
+    country: str,
+    arrive: str,
+    depart: str,
+    status: str = "planned",
+    scope: str = "personal",
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Append one segment to an existing itinerary and re-sort by arrival date.
+
+    Returns the recomputed open windows so the caller sees immediately what the
+    new segment consumed. Overlaps are reported, never silently merged.
+    """
+    segment = itinerary_mod.Segment.build(
+        city=city, country=country, arrive=arrive, depart=depart,
+        status=status, scope=scope, note=note,
+    )
+    with audit.timed("add_itinerary_segment",
+                     input_payload={"slug": slug, "segment": segment.to_dict()}) as ctx:
+        trip = itinerary_mod.load(slug).with_segment(segment)
+        written = itinerary_mod.save(trip)
+        out = {
+            **written,
+            "trip": trip.to_dict(),
+            "open_windows": [w.to_dict() for w in trip.open_windows()],
+            "conflicts": trip.conflicts(),
+        }
+        ctx["output"] = {"slug": trip.slug, "segments": len(trip.segments)}
+        return out
+
+
+@mcp.tool()
+def itinerary_open_windows(slug: str, include_candidates: bool = False) -> dict[str, Any]:
+    """Unallocated stretches inside the trip window.
+
+    A segment occupies both its arrive day and its depart day, so a window runs
+    from (previous depart + 1) to (next arrive - 1). At the edges of the trip
+    window there is no boundary day to give up.
+
+    By default only `locked` and `planned` segments consume time — a `candidate`
+    is a proposal to FILL a window, so it must not eat one. Pass
+    include_candidates=true to see what the window looks like if every candidate
+    were accepted.
+    """
+    statuses = ("locked", "planned", "candidate") if include_candidates else itinerary_mod.COMMITTED_STATUSES
+    with audit.timed("itinerary_open_windows",
+                     input_payload={"slug": slug, "include_candidates": include_candidates}) as ctx:
+        trip = itinerary_mod.load(slug)
+        windows = trip.open_windows(statuses)
+        out = {
+            "slug": trip.slug,
+            "window_start": trip.window_start,
+            "window_end": trip.window_end,
+            "window_days": trip.window_days,
+            "counted_statuses": list(statuses),
+            "open_windows": [w.to_dict() for w in windows],
+            "open_days_total": sum(w.days for w in windows),
+        }
+        ctx["output"] = {"slug": trip.slug, "windows": len(windows)}
+        return out
+
+
+@mcp.tool()
+def plan_window_packing(
+    slug: str,
+    hours_of_interest: float | None = None,
+    completionism: float = 0.6,
+    discretionary_hours: float | None = None,
+    hours_low: float | None = None,
+    hours_high: float | None = None,
+    overhead_days: int = 1,
+    include_candidates: bool = False,
+) -> dict[str, Any]:
+    """How many places fit in each open window, as a range.
+
+    Combines the dwell-time range with k_max = floor((L + overhead) / (dwell + overhead)).
+    Longer stays mean fewer places, so the low end of the dwell range produces the
+    HIGH end of the place count.
+
+    discretionary_hours defaults to the saved preference profile's daily figure.
+    overhead_days is the travel/transition cost between two places.
+    """
+    hours_per_day = discretionary_hours
+    if hours_per_day is None:
+        hours_per_day = preferences_mod.load().time_budget.discretionary_hours_per_day
+    with audit.timed("plan_window_packing",
+                     input_payload={"slug": slug, "completionism": completionism,
+                                    "discretionary_hours": hours_per_day,
+                                    "overhead_days": overhead_days}) as ctx:
+        trip = itinerary_mod.load(slug)
+        statuses = ("locked", "planned", "candidate") if include_candidates else itinerary_mod.COMMITTED_STATUSES
+        estimate = dwell_mod.estimate(
+            trip.title, completionism=completionism, discretionary_hours=hours_per_day,
+            hours_of_interest=hours_of_interest, hours_low=hours_low, hours_high=hours_high,
+        )
+        packed = []
+        for w in trip.open_windows(statuses):
+            packed.append({**w.to_dict(), **dwell_mod.pack_window(w.days, estimate, overhead_days)})
+        out = {
+            "slug": trip.slug,
+            "dwell": estimate.to_dict(),
+            "windows": packed,
+        }
+        ctx["output"] = {"slug": trip.slug, "windows": len(packed)}
+        return out
+
+
+@mcp.tool()
+def dwell_time_estimate(
+    place: str,
+    completionism: float,
+    discretionary_hours: float,
+    hours_of_interest: float | None = None,
+    hours_low: float | None = None,
+    hours_high: float | None = None,
+    hours_uncertainty: float = 0.25,
+) -> dict[str, Any]:
+    """Days to spend in one place: days = ceil(H * completionism / discretionary_hours), floor 2.
+
+    ALWAYS a range with a confidence, never a point value — H is an estimate, so a
+    single number would be false precision. Supply either hours_of_interest (the
+    spread is derived and confidence caps at medium) or hours_low + hours_high (a
+    measured range, which can reach high confidence).
+    """
+    with audit.timed("dwell_time_estimate",
+                     input_payload={"place": place, "completionism": completionism,
+                                    "discretionary_hours": discretionary_hours}) as ctx:
+        estimate = dwell_mod.estimate(
+            place, completionism=completionism, discretionary_hours=discretionary_hours,
+            hours_of_interest=hours_of_interest, hours_low=hours_low, hours_high=hours_high,
+            hours_uncertainty=hours_uncertainty,
+        )
+        out = estimate.to_dict()
+        ctx["output"] = {"place": estimate.place, "days_low": estimate.days_low,
+                         "days_high": estimate.days_high, "confidence": estimate.confidence}
+        return out
+
+
+# ---------------------------- PREFERENCE PROFILE v2 ----------------------------
+
+@mcp.tool()
+def get_preference_profile() -> dict[str, Any]:
+    """Read preference profile v2: dials, time budget, places, standing seeds."""
+    with audit.timed("get_preference_profile", input_payload={}) as ctx:
+        prof = preferences_mod.load()
+        out = prof.to_dict()
+        ctx["output"] = {"places": len(prof.places), "seeds": len(prof.seeds)}
+        return out
+
+
+@mcp.tool()
+def set_travel_dials(novelty: float, depth: float) -> dict[str, Any]:
+    """Set the two INDEPENDENT dials (0.0-1.0 each).
+
+    novelty = appetite for places you have not been. depth = appetite for going
+    deep where you are. They are not opposites: wanting new places and wanting
+    them properly is not a contradiction, so both may be 1.0.
+    """
+    with audit.timed("set_travel_dials",
+                     input_payload={"novelty": novelty, "depth": depth}) as ctx:
+        prof = preferences_mod.load().with_dials(novelty, depth)
+        written = preferences_mod.save(prof)
+        out = {**written, "dials": prof.dials.to_dict()}
+        ctx["output"] = out
+        return out
+
+
+@mcp.tool()
+def set_time_budget(
+    discretionary_hours_per_day: float,
+    work_start: str | None = None,
+    work_end: str | None = None,
+    work_days: list[str] | None = None,
+) -> dict[str, Any]:
+    """Set daily discretionary hours and the optional work-hours block.
+
+    discretionary_hours_per_day is the free time on a NON-work day. On a work day
+    the block is subtracted from it. Times are 24-hour HH:MM; work_days are
+    mon..sun.
+    """
+    block = None
+    if work_start or work_end:
+        if not (work_start and work_end):
+            raise V.ValidationError("supply BOTH work_start and work_end, or neither")
+        block = {"start": work_start, "end": work_end, "days": work_days or []}
+    with audit.timed("set_time_budget",
+                     input_payload={"discretionary_hours_per_day": discretionary_hours_per_day,
+                                    "work_block": block}) as ctx:
+        prof = preferences_mod.load().with_time_budget(discretionary_hours_per_day, block)
+        written = preferences_mod.save(prof)
+        out = {**written, "time_budget": prof.time_budget.to_dict()}
+        ctx["output"] = out
+        return out
+
+
+@mcp.tool()
+def upsert_place_preference(
+    place: str,
+    relationships: list[str],
+    country: str | None = None,
+    seed_refs: list[str] | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Record what a place MEANS — as many relationships at once as apply.
+
+    relationships (one or more): for-a-person | love-the-place | never-mind-it |
+    been-done | want-to-go. A place can be for-a-person AND been-done AND
+    love-the-place at the same time; forcing a single label loses the nuance that
+    decides the trip.
+
+    seed_refs point at standing seeds BY REFERENCE — the seed's values are never
+    copied in, so editing a seed updates every place that references it.
+    """
+    pref = preferences_mod.PlacePreference.build(
+        place=place, relationships=relationships, country=country,
+        seed_refs=seed_refs or (), note=note,
+    )
+    with audit.timed("upsert_place_preference",
+                     input_payload={"place": pref.place,
+                                    "relationships": list(pref.relationships)}) as ctx:
+        prof = preferences_mod.load().upsert_place(pref)
+        written = preferences_mod.save(prof)
+        out = {**written, "place": prof.resolve_place(pref.place)}
+        ctx["output"] = {"place": pref.place, "relationships": list(pref.relationships)}
+        return out
+
+
+@mcp.tool()
+def upsert_preference_seed(key: str, label: str | None = None,
+                           values: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Create or update a standing seed that places point at by reference.
+
+    Editing a seed changes every place referencing it, because places store the
+    key and resolve at read time rather than copying the values.
+    """
+    seed = preferences_mod.Seed.build(key=key, label=label, values=values)
+    with audit.timed("upsert_preference_seed", input_payload={"key": seed.key}) as ctx:
+        prof = preferences_mod.load().upsert_seed(seed)
+        written = preferences_mod.save(prof)
+        referencing = [p.place for p in prof.places if seed.key in p.seed_refs]
+        out = {**written, "seed": seed.to_dict(), "referencing_places": referencing}
+        ctx["output"] = {"key": seed.key, "referencing_places": len(referencing)}
+        return out
+
+
+@mcp.tool()
+def resolve_place_preference(place: str) -> dict[str, Any]:
+    """Resolve a place's seeds AT READ TIME. Dangling refs are surfaced, not dropped."""
+    with audit.timed("resolve_place_preference", input_payload={"place": place}) as ctx:
+        resolved = preferences_mod.load().resolve_place(place)
+        ctx["output"] = {"place": resolved["place"],
+                         "dangling": resolved["dangling_seed_refs"]}
+        return resolved
+
+
+# ------------------------------ BEEN-THERE LEDGER ------------------------------
+
+@mcp.tool()
+def record_country_inference(
+    country: str,
+    source: str,
+    claim: bool = True,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """Commit an UNCONFIRMED inference about a country visit.
+
+    An inference the traveler has not confirmed counts as NOT VISITED and is
+    committed as such right now — never left pending, never counted as a visit.
+    The guess is preserved in `claim` so it can be asked about later, but no count
+    reads it. Upgrade it with confirm_country_visit once the traveler answers.
+    """
+    with audit.timed("record_country_inference",
+                     input_payload={"country": country, "claim": claim,
+                                    "source": V.truncate(source, 200)}) as ctx:
+        led = ledger_mod.load().record_inference(country, claim=claim, source=source, note=note)
+        written = ledger_mod.save(led)
+        record = led.get(country)
+        out = {
+            **written,
+            "record": record.to_dict() if record else None,
+            "count_visited": led.count_visited(),
+            "rule": "unconfirmed inference is committed as NOT visited",
+        }
+        ctx["output"] = {"country": country, "visited": bool(record and record.visited)}
+        return out
+
+
+@mcp.tool()
+def confirm_country_visit(country: str, visited: bool, source: str | None = None,
+                          note: str | None = None) -> dict[str, Any]:
+    """Record the traveler's own answer. True -> `confirmed` and counts.
+    False -> `asked` and does not count. This is the only path to a counted visit.
+    """
+    with audit.timed("confirm_country_visit",
+                     input_payload={"country": country, "visited": visited}) as ctx:
+        led = ledger_mod.load().confirm(country, visited=visited, source=source, note=note)
+        written = ledger_mod.save(led)
+        record = led.get(country)
+        out = {**written, "record": record.to_dict() if record else None,
+               "count_visited": led.count_visited()}
+        ctx["output"] = {"country": country, "visited": bool(record and record.visited)}
+        return out
+
+
+@mcp.tool()
+def get_been_there_ledger() -> dict[str, Any]:
+    """Read the been-there ledger: every row, the confirmed count, and the
+    unconfirmed rows worth asking about."""
+    with audit.timed("get_been_there_ledger", input_payload={}) as ctx:
+        led = ledger_mod.load()
+        out = led.to_dict()
+        ctx["output"] = {"records": len(led.records), "visited": led.count_visited()}
+        return out
+
+
+# ----------------------------- ENTRY ELIGIBILITY -----------------------------
+
+@mcp.tool()
+def set_entry_eligibility(country: str, state: str, source: str | None = None,
+                          as_of: str | None = None, note: str | None = None) -> dict[str, Any]:
+    """Record entry eligibility in one of THREE states.
+
+    verified-eligible | verified-ineligible | unchecked
+
+    Both verified states REQUIRE a source and an as-of date — a verification whose
+    provenance was not recorded is not a verification. as_of defaults to today.
+    """
+    with audit.timed("set_entry_eligibility",
+                     input_payload={"country": country, "state": state,
+                                    "source": V.truncate(source or "", 200)}) as ctx:
+        store = eligibility_mod.load().set_state(country, state, source=source,
+                                                 as_of=as_of, note=note)
+        written = eligibility_mod.save(store)
+        out = {**written, "record": store.get(country).to_dict()}
+        ctx["output"] = {"country": country, "state": store.get(country).state}
+        return out
+
+
+@mcp.tool()
+def get_entry_eligibility(countries: list[str] | None = None) -> dict[str, Any]:
+    """DISPLAY view: every state including `unchecked`.
+
+    A UI may render unchecked as unchecked — hiding it would make an unknown look
+    like a no. To decide what a router may PROPOSE, use filter_proposable_countries.
+    """
+    with audit.timed("get_entry_eligibility",
+                     input_payload={"countries": countries}) as ctx:
+        store = eligibility_mod.load()
+        rows = store.display(countries)
+        ctx["output"] = {"count": len(rows)}
+        return {"count": len(rows), "records": rows}
+
+
+@mcp.tool()
+def filter_proposable_countries(countries: list[str],
+                                max_age_days: int | None = None) -> dict[str, Any]:
+    """ROUTER view: split candidates into proposable and refused.
+
+    Only `verified-eligible` is proposable. `unchecked` is not a soft yes, and it
+    is refused with reason "unchecked". Passing max_age_days also refuses a
+    verification older than that, with reason "stale-verification".
+    """
+    with audit.timed("filter_proposable_countries",
+                     input_payload={"countries": countries, "max_age_days": max_age_days}) as ctx:
+        result = eligibility_mod.load().filter_proposable(countries, max_age_days=max_age_days)
+        ctx["output"] = {"proposable": result["proposable_count"],
+                         "refused": result["refused_count"]}
+        return result
+
+
+# ------------------------------- PREREQUISITES -------------------------------
+
+@mcp.tool()
+def save_trip_prerequisites(trip_slug: str,
+                            prerequisites: list[dict[str, Any]]) -> dict[str, Any]:
+    """Store the prerequisite graph for a trip.
+
+    Each entry: {key, kind, label, lead_days, hard_cutoff_days, country, depends_on}.
+    kind ∈ visa-in-advance | vaccination | permit | document | booking.
+
+      lead_days         how long the process takes once started
+      hard_cutoff_days  must be COMPLETE this many days before departure
+      depends_on        keys that must complete before this one can start
+
+    A dependency cycle or an unknown key is rejected at write time, so an
+    unschedulable graph never lands on disk.
+    """
+    with audit.timed("save_trip_prerequisites",
+                     input_payload={"trip_slug": trip_slug,
+                                    "count": len(prerequisites or [])}) as ctx:
+        written = prereqs_mod.save(trip_slug, prerequisites)
+        stored = prereqs_mod.load(trip_slug)
+        out = {**written, "prerequisites": [p.to_dict() for p in stored]}
+        ctx["output"] = {"trip_slug": trip_slug, "count": len(stored)}
+        return out
+
+
+@mcp.tool()
+def prerequisite_schedule(
+    trip_slug: str,
+    departure: str,
+    today: str | None = None,
+    warn_days: int = 7,
+) -> dict[str, Any]:
+    """Schedule the saved prerequisites BACKWARD from departure.
+
+    complete_by = min(departure - hard_cutoff_days, earliest start of anything
+    that depends on this); start_by = complete_by - lead_days. Sorted by urgency,
+    each row marked overdue | due-soon | on-track against `today`.
+    """
+    with audit.timed("prerequisite_schedule",
+                     input_payload={"trip_slug": trip_slug, "departure": departure,
+                                    "warn_days": warn_days}) as ctx:
+        stored = prereqs_mod.load(trip_slug)
+        scheduled = prereqs_mod.schedule_backward(
+            stored, departure, today=today, warn_days=warn_days,
+        )
+        departure_iso = V.coerce_iso_date(departure, field="departure")
+        out = {"trip_slug": V.validate_slug(trip_slug),
+               **prereqs_mod.summarize(scheduled, departure=departure_iso)}
+        ctx["output"] = {"trip_slug": trip_slug, "count": len(scheduled),
+                         "overdue": len(out["overdue"])}
+        return out
 
 
 if __name__ == "__main__":

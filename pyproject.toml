@@ -63,6 +63,12 @@ only-include = [
     "profile.py",
     "router.py",
     "prompts.py",
+    "itinerary.py",
+    "preferences.py",
+    "ledger.py",
+    "dwell.py",
+    "eligibility.py",
+    "prereqs.py",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -73,6 +79,12 @@ include = [
     "/profile.py",
     "/router.py",
     "/prompts.py",
+    "/itinerary.py",
+    "/preferences.py",
+    "/ledger.py",
+    "/dwell.py",
+    "/eligibility.py",
+    "/prereqs.py",
     "/README.md",
     "/SETUP.md",
     "/CHANGELOG.md",

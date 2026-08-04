@@ -4,6 +4,25 @@ All notable changes to travel-mcp will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Structured itinerary model.** A trip is now ORDERED SEGMENTS rather than prose: `{city, country, arrive, depart, status, scope}` with `status` ∈ locked | planned | candidate and `scope` ∈ personal | company. `scope` ships in the first migration even though the company lane starts empty, so no stored trip needs migrating later. Persisted at `Itineraries/<slug>.md` as frontmatter (round-trips as real data) plus a rendered body (readable in the vault).
+- **Open-window computation.** A segment occupies both its arrive day and its depart day, so a free stretch runs from (previous depart + 1) to (next arrive − 1); at the trip-window edges there is no boundary day to give up. A `candidate` is a proposal to FILL a window, so by default it does not consume one.
+- **Dwell time as a range.** `days = ceil(H × completionism / discretionary_hours)`, floor of 2, always returned as a range with a confidence — `to_dict()` deliberately emits no `days` key, so no caller can grab a point value by accident. A single unmeasured hours estimate caps confidence at medium however tight the arithmetic looks.
+- **Window packing.** `k_max = floor((L + overhead) / (dwell + overhead))`. Longer stays mean fewer places, so the low end of the dwell range produces the high end of the place count; `pack_window` performs that inversion.
+- **Preference profile v2.** Places carry multiple relationships at once (for-a-person, love-the-place, never-mind-it, been-done, want-to-go). Novelty and depth are independent dials — nothing normalizes the pair or derives one from the other. Standing seeds apply by reference, so editing a seed reaches every place pointing at it; dangling refs are surfaced, not silently dropped.
+- **Been-there ledger with per-country provenance** (inferred | confirmed | asked | unknown). An unconfirmed inference counts as NOT visited and is committed as such in the same call — never pending, never counted. There is deliberately no `pending` state, and the rule is re-applied on LOAD, so a hand-edited file claiming `visited: true, provenance: inferred` is corrected on read rather than trusted.
+- **Entry-eligibility store** with three states (verified-eligible | verified-ineligible | unchecked), each verified state requiring a source and an as-of date. `assert_proposable` refuses anything not verified-eligible with no third outcome, while `display()` still returns unchecked rows so a UI can label them. Passing `max_age_days` refuses a stale verification instead of letting it quietly become a lie.
+- **Prerequisite graph scheduled backward from departure.** `complete_by = min(departure − hard_cutoff_days, earliest start of anything depending on this)`; `start_by = complete_by − lead_days`. Dependency cycles and unknown keys raise at write time, so an unschedulable graph never reaches disk.
+- **21 new MCP tools** (42 total). All deterministic and offline — the itinerary surface makes no LLM call. The original 21 tools are unchanged and un-renamed, with a registry regression test to keep it that way.
+
+### Notes
+
+- New modules are added to the wheel + sdist manifests in `pyproject.toml`; omitting them would have shipped a broken package.
+- Loading coerces dates defensively: unquoted `2026-10-08` in hand-edited YAML parses as a `date` object, not a string, so every load path coerces rather than trusting the writer's quoting.
+
 ## [0.1.1] — 2026-05-26
 
 ### Fixed

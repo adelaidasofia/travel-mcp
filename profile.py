@@ -25,6 +25,10 @@ VAULT_ENV = "TRAVEL_MCP_VAULT_PATH"
 FOLDER_ENV = "TRAVEL_MCP_PROFILE_FOLDER"
 DEFAULT_FOLDER = "🧳 Travel"
 
+#: Structured-data subfolders (itinerary model + prerequisite graphs).
+ITINERARIES_SUBDIR = "Itineraries"
+PREREQUISITES_SUBDIR = "Prerequisites"
+
 PROFILE_TEMPLATE = """---
 type: travel_profile
 created: {created}
@@ -186,6 +190,16 @@ def companions_dir() -> Path | None:
     return None if tr is None else tr / "Companions"
 
 
+def itineraries_dir() -> Path | None:
+    tr = travel_root()
+    return None if tr is None else tr / ITINERARIES_SUBDIR
+
+
+def prerequisites_dir() -> Path | None:
+    tr = travel_root()
+    return None if tr is None else tr / PREREQUISITES_SUBDIR
+
+
 def profile_path() -> Path | None:
     tr = travel_root()
     return None if tr is None else tr / "Profile.md"
@@ -203,7 +217,7 @@ def ensure_dirs() -> dict[str, Any]:
             "Set TRAVEL_MCP_VAULT_PATH in admin.env or .mcp.json env block."
         )
     created, existed = [], []
-    for d in (tr, trips_dir(), companions_dir()):
+    for d in (tr, trips_dir(), companions_dir(), itineraries_dir(), prerequisites_dir()):
         if d is None:
             continue
         if d.exists():
@@ -381,3 +395,60 @@ def read_trip(slug: str) -> dict[str, Any]:
         raise FileNotFoundError(f"trip plan not found: {p.name}")
     post = frontmatter.load(str(p))
     return {"slug": slug, "frontmatter": dict(post.metadata), "body": post.content, "path": str(p)}
+
+
+# ---------------- structured data docs ----------------
+# Itineraries, been-there ledger, entry eligibility, preference profile v2 and
+# prerequisite graphs are STRUCTURED. They live in frontmatter (round-trips as
+# real data) with a rendered markdown body (readable in the vault UI), so the
+# same file serves the model and the human.
+
+
+def _data_doc_path(relpath: str) -> Path:
+    """Resolve a path under the travel root, refusing anything that escapes it."""
+    tr = travel_root()
+    if tr is None:
+        raise RuntimeError(f"{VAULT_ENV} unset; cannot resolve travel folder")
+    candidate = (tr / relpath).resolve()
+    root = tr.resolve()
+    if candidate != root and not candidate.is_relative_to(root):
+        raise ValueError(f"path escapes the travel folder: {relpath!r}")
+    return candidate
+
+
+def read_data_doc(relpath: str) -> dict[str, Any] | None:
+    """Return {frontmatter, body, path} or None when the file does not exist."""
+    p = _data_doc_path(relpath)
+    if not p.exists():
+        return None
+    post = frontmatter.load(str(p))
+    return {"frontmatter": dict(post.metadata), "body": post.content, "path": str(p)}
+
+
+def write_data_doc(relpath: str, meta: dict[str, Any], body: str) -> dict[str, Any]:
+    p = _data_doc_path(relpath)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    post = frontmatter.Post(content=body)
+    post.metadata.update(meta)
+    with p.open("w", encoding="utf-8") as f:
+        f.write(frontmatter.dumps(post))
+        if not body.endswith("\n"):
+            f.write("\n")
+    return {"path": str(p), "bytes": p.stat().st_size}
+
+
+def list_data_docs(subdir: str) -> list[dict[str, Any]]:
+    tr = travel_root()
+    if tr is None:
+        return []
+    d = _data_doc_path(subdir)
+    if not d.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    for f in sorted(d.glob("*.md")):
+        try:
+            post = frontmatter.load(str(f))
+            out.append({"stem": f.stem, "path": str(f), "frontmatter": dict(post.metadata)})
+        except Exception:
+            out.append({"stem": f.stem, "path": str(f), "frontmatter": {}})
+    return out
