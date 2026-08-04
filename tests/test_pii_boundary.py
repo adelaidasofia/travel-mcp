@@ -630,7 +630,6 @@ def test_legacy_number_in_an_untouched_profile_section_is_remediated(travel_vaul
 @pytest.mark.parametrize("text", [
     "passport copy + ref ABC123456",             # conjunction -> two nouns
     "passport and hotel reference ABC123456",
-    "Passport copy, ref ABC123456",
     "passport scan and reference DEF987654",
     "Passport photo + reference GHI555444",
     "passport copy and booking reference ABC123456",
@@ -683,3 +682,60 @@ def test_bare_id_with_a_pure_number_is_a_loyalty_id(travel_vault, text):
     profile.ensure_dirs()
     profile.save_trip("id-loyalty", "summary", text)      # must not raise
     assert "REDACTED" not in audit.sanitize_error(text)
+
+
+# --------------------------------------------------------------------------
+# 12. The irreducible band, pinned so its boundary is explicit rather than
+#     accidental. `,` and `;` are PUNCTUATION to skip over, not conjunctions:
+#     "cedula, ref 1020123456" lists the cedula's OWN reference and must
+#     refuse. The cost is one named over-block below. A document number on
+#     disk outranks a refused note, so the trade is deliberate, not incidental.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "cedula, ref 1020123456",
+    "passport; ref AN7734515",
+    "passport & ref AN7734516",
+    "Traveler docs, passport, ref AN7734518",
+])
+def test_punctuation_does_not_exempt_a_document_number(travel_vault, text):
+    import profile
+
+    profile.ensure_dirs()
+    with pytest.raises(profile.IdentityDocumentRejected):
+        profile.save_trip("punct", "summary", text)
+
+
+def test_accepted_overblock_comma_before_ref(travel_vault):
+    """ACCEPTED COST, pinned so it stays visible instead of being rediscovered.
+
+    "Passport copy, ref ABC123456" is a booking reference and is refused,
+    because once the comma is punctuation it is structurally identical to
+    "cedula, ref 1020123456". Only the token differs, and ABC123456 vs
+    AN7734512 is one digit apart -- not separable. Containment wins the tie.
+    """
+    import profile
+
+    profile.ensure_dirs()
+    with pytest.raises(profile.IdentityDocumentRejected):
+        profile.save_trip("accepted-overblock", "summary",
+                          "Passport copy, ref ABC123456")
+
+
+@pytest.mark.parametrize("text", [
+    "passport and ref AN7734512",
+    "passport with reference AN7734513",
+    "pasaporte y ref AN7734514",
+])
+def test_known_gap_conjunction_before_ref_is_not_caught(travel_vault, text):
+    """KNOWN GAP, pinned so it can never be mistaken for coverage.
+
+    A real conjunction makes the phrase genuinely ambiguous: "passport and ref
+    X" can mean the passport's reference or a booking reference, and a human
+    reader cannot tell either. The rule resolves toward itinerary, so these
+    WRITE. Recorded in the commit message; not silently absent from the suite.
+    """
+    import profile
+
+    profile.ensure_dirs()
+    profile.save_trip("known-gap", "summary", text)      # writes, by design

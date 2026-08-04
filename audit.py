@@ -110,7 +110,7 @@ _DOC_LABEL_RE = re.compile(
     r"(?i)\b(passports?|pasaportes?|c[ée]dulas?|dni|nit|curp|rfc|ssn|"
     r"social\s+security|national\s+id|tax\s+id|documentos?|"
     r"(?:travel\s+|identity\s+|government\s+)?document|"
-    r"id\b(?:\s+(?:is|es|number|no\.?|num|card))?\s*[:#]?\s*"
+    r"id\b(?:\s*[:#=/(\[-]\s*|\s+)?(?:is|es|number|n[uú]mero|no\.?|nro\.?|num|card|tarjeta)?\s*[:#=/(\[-]?\s*"
     r"(?=\S*\d)(?=\S*[A-Za-z])|id\s+(?:number|no\.?|card)|"
     r"identification|identificaci[óo]n|"
     r"reisepass|passeport)\b"
@@ -132,7 +132,7 @@ _ITINERARY_LABEL_RE = re.compile(
 #: two different nouns ("passport copy + ref ABC123456"), while a continuous
 #: noun phrase names the document itself ("passport reference number: X").
 _AMBIGUOUS_REF_RE = re.compile(r"(?i)\b(references?|refs?)\b")
-_CONJUNCTION_RE = re.compile(r"(?i)(\+|&|,|;|\band\b|\by\b|\bwith\b|\bplus\b)")
+_CONJUNCTION_RE = re.compile(r"(?i)(\+|\band\b|\by\b|\bwith\b|\bplus\b)")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}\S*)?$")
 
 #: A flight number carries at most 4 digits (AA1234); a PNR carries few. Real
@@ -191,7 +191,7 @@ def _looks_like_document_number(token: str) -> bool:
 #: token SHAPE, not this count, is what keeps "Passport office room 12345" and
 #: "Passport fee 150000 COP" writable.
 _MAX_FILLER_WORDS = 3
-_FILLER_RE = re.compile(r"^[\s:=#.\-'’()\[\]]*([A-Za-zÀ-ſ]{1,15})(?=[\s:=#.\-'’()\[\]]|$)")
+_FILLER_RE = re.compile(r"^[\s:=#.\-'’()\[\],;&/]*([A-Za-zÀ-ſ]{1,15})(?=[\s:=#.\-'’()\[\],;&/]|$)")
 
 
 def _find_document_spans(text: str, *, strict: bool = False) -> list[tuple[int, int]]:
@@ -226,7 +226,7 @@ def _find_document_spans(text: str, *, strict: bool = False) -> list[tuple[int, 
                 while (m := _FILLER_RE.match(gap)):
                     fillers += 1
                     gap = gap[m.end():]
-                if fillers > _MAX_FILLER_WORDS or gap.strip(" :=#.-\t\n\r'’()[]"):
+                if fillers > _MAX_FILLER_WORDS or gap.strip(" :=#.-\t\n\r'’()[],;&/"):
                     continue
             spans.append((label.end() + tok.start(), label.end() + tok.end()))
     return spans
