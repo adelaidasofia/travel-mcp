@@ -617,3 +617,69 @@ def test_legacy_number_in_an_untouched_profile_section_is_remediated(travel_vaul
     assert FAKE_PASSPORT not in pp.read_text(encoding="utf-8")
     assert "body" in result["removed_identity_fields"]
     assert "Primary airport: BOG" in pp.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# 11. Structural disambiguation. `reference`/`ref` and `ID` belong to BOTH
+#     vocabularies, so no label set can own them: assigning them to itinerary
+#     leaked passport numbers, assigning them to document ate booking refs.
+#     They are disambiguated by STRUCTURE, and both directions are pinned here
+#     so neither can be traded for the other again.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "passport copy + ref ABC123456",             # conjunction -> two nouns
+    "passport and hotel reference ABC123456",
+    "Passport copy, ref ABC123456",
+    "passport scan and reference DEF987654",
+    "Passport photo + reference GHI555444",
+    "passport copy and booking reference ABC123456",
+])
+def test_reference_after_a_conjunction_is_an_itinerary_value(travel_vault, text):
+    import audit
+    import profile
+
+    profile.ensure_dirs()
+    profile.save_trip("ref-ok", "summary", text)          # must not raise
+    assert "REDACTED" not in audit.sanitize_error(text)
+
+
+@pytest.mark.parametrize("text", [
+    "passport reference number: TT7734512",      # continuous noun phrase
+    "Passport ref: YY7734512",
+    "cedula reference number 1020123456",
+    "national id reference AB7734512",
+])
+def test_reference_without_a_conjunction_names_the_document(travel_vault, text):
+    import profile
+
+    profile.ensure_dirs()
+    with pytest.raises(profile.IdentityDocumentRejected):
+        profile.save_trip("ref-doc", "summary", text)
+
+
+@pytest.mark.parametrize("text", [
+    "ID: M17734512", "Colombian ID N27734512", "ID# P47734512",
+    "my ID is O37734512", "ID no. Q57734512", "ID card R67734512",
+])
+def test_bare_id_with_an_alphanumeric_token_is_a_document(travel_vault, text):
+    import profile
+
+    profile.ensure_dirs()
+    with pytest.raises(profile.IdentityDocumentRejected):
+        profile.save_trip("id-doc", "summary", text)
+
+
+@pytest.mark.parametrize("text", [
+    "AAdvantage ID 12345678", "Bonvoy ID: 87654321",
+    "Marriott Bonvoy ID 123456789", "Rental company: Hertz - loyalty ID: 55512345",
+])
+def test_bare_id_with_a_pure_number_is_a_loyalty_id(travel_vault, text):
+    """A loyalty number is pure digits; a document number written after bare
+    `ID` is alphanumeric. Shape is what separates them."""
+    import audit
+    import profile
+
+    profile.ensure_dirs()
+    profile.save_trip("id-loyalty", "summary", text)      # must not raise
+    assert "REDACTED" not in audit.sanitize_error(text)

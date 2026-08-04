@@ -110,7 +110,9 @@ _DOC_LABEL_RE = re.compile(
     r"(?i)\b(passports?|pasaportes?|c[ée]dulas?|dni|nit|curp|rfc|ssn|"
     r"social\s+security|national\s+id|tax\s+id|documentos?|"
     r"(?:travel\s+|identity\s+|government\s+)?document|"
-    r"id\s+(?:number|no\.?|card)|identification|identificaci[óo]n|"
+    r"id\b(?:\s+(?:is|es|number|no\.?|num|card))?\s*[:#]?\s*"
+    r"(?=\S*\d)(?=\S*[A-Za-z])|id\s+(?:number|no\.?|card)|"
+    r"identification|identificaci[óo]n|"
     r"reisepass|passeport)\b"
 )
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{3,}")
@@ -123,6 +125,14 @@ _ITINERARY_LABEL_RE = re.compile(
     r"(?i)\b(booking|confirmation|confirm|record\s+locator|pnr|"
     r"flight|ticket|reserva|localizador|orden|order)\b"
 )
+#: `reference` / `ref` belongs to BOTH vocabularies, so neither label set can
+#: own it -- pass 4 put it in itinerary and leaked passport numbers, pass 5 took
+#: it out and ate booking references. It is disambiguated by STRUCTURE instead:
+#: a conjunction or list separator between the document label and the word means
+#: two different nouns ("passport copy + ref ABC123456"), while a continuous
+#: noun phrase names the document itself ("passport reference number: X").
+_AMBIGUOUS_REF_RE = re.compile(r"(?i)\b(references?|refs?)\b")
+_CONJUNCTION_RE = re.compile(r"(?i)(\+|&|,|;|\band\b|\by\b|\bwith\b|\bplus\b)")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}\S*)?$")
 
 #: A flight number carries at most 4 digits (AA1234); a PNR carries few. Real
@@ -203,6 +213,12 @@ def _find_document_spans(text: str, *, strict: bool = False) -> list[tuple[int, 
             gap_text = window[:tok.start()]
             it = list(_ITINERARY_LABEL_RE.finditer(gap_text))
             if it and not _DOC_LABEL_RE.search(gap_text[it[-1].end():]):
+                continue
+            # `ref`/`reference` counts as an itinerary label only when a
+            # conjunction separates it from the document label.
+            ref = list(_AMBIGUOUS_REF_RE.finditer(gap_text))
+            if ref and _CONJUNCTION_RE.search(gap_text[:ref[-1].start()]) \
+                    and not _DOC_LABEL_RE.search(gap_text[ref[-1].end():]):
                 continue
             if strict:
                 gap = window[:tok.start()]
