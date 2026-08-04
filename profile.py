@@ -376,6 +376,14 @@ def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None)
     post.metadata["type"] = "travel_companion"
     post.metadata["name"] = name
     post.metadata.update({k: v for k, v in fields.items() if v is not None})
+    # Remediate, do not merely refuse. A number written by the pre-fix version
+    # (or typed into Obsidian by hand) is read off disk and would be rewritten
+    # verbatim by this guarded path. Raising would leave such a file permanently
+    # unwritable, so strip it here and report what was removed.
+    stripped = [k for k in list(post.metadata)
+                if audit.is_document_number_key(k)]
+    for k in stripped:
+        post.metadata.pop(k, None)
     post.metadata["last_updated"] = time.strftime("%Y-%m-%d")
     if body is not None:
         post.content = body
@@ -383,7 +391,8 @@ def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None)
         f.write(frontmatter.dumps(post))
         if not post.content.endswith("\n"):
             f.write("\n")
-    return {"path": str(p), "name": name, "bytes": p.stat().st_size}
+    return {"path": str(p), "name": name, "bytes": p.stat().st_size,
+            "removed_identity_fields": stripped}
 
 
 # ---------------- trip plans ----------------

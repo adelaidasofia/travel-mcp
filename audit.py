@@ -77,7 +77,8 @@ _DOCUMENT_NUMBER_KEYS: frozenset[str] = frozenset({
     "document_number", "doc_number", "id_number", "id_no",
     "identity_document", "identity_number",
     # national / tax identifiers, US
-    "national_id", "national_id_number", "national_identity_number",
+    "national_id", "nationalid", "national_id_number", "national_identity_number",
+    "passport_number2", "passportnumber2", "passport_no2",
     "ssn", "social_security", "social_security_number", "tax_id", "tin",
     # LatAm national + tax documents. The primary traveler here is a dual
     # Colombian/US national, so these are the expected case, not an exotic one.
@@ -109,8 +110,17 @@ _DOC_LABEL_RE = re.compile(
     r"(?i)\b(passports?|pasaportes?|c[ée]dulas?|dni|nit|curp|rfc|ssn|"
     r"social\s+security|national\s+id|tax\s+id|documento)\b"
 )
-_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]{4,}")
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{3,}")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}\S*)?$")
+
+#: A flight number carries at most 4 digits (AA1234); a PNR carries few. Real
+#: document numbers carry long digit runs. Thresholding on the RUN rather than
+#: the total is what separates "passport ... flight AA1234" from a passport
+#: number sitting next to the same word.
+_MIN_DIGITS_IN_GROUP = 5
+#: A grouped document number (Colombian cédula "1.020.123.456") has short
+#: groups but a long total once separators are stripped.
+_MIN_DIGITS_TOTAL_GROUPED = 8
 
 #: How far past a document label a number still counts as that label's value.
 #: Wide enough for "passport number is X" and for a slugified filename where
@@ -120,25 +130,63 @@ _LABEL_PROXIMITY = 40
 
 
 def _looks_like_document_number(token: str) -> bool:
-    """A token shaped like a document number rather than a word or a date.
+    """A token shaped like a document NUMBER rather than a word, date or code.
 
-    Requires digits, so prose after the label ("passport validity", "issuing
-    country") is untouched. Excludes ISO dates, because passport EXPIRY is data
-    this system deliberately keeps.
+    An earlier threshold of "5+ chars with 2+ digits" swept up everything travel
+    prose is made of: flight numbers, PNRs, the Schengen "90-day" rule, fee
+    ranges like "130-165" and form codes like "DS-11". Splitting on the
+    separators first, then asking for a long digit RUN, keeps those while still
+    catching AN7734512 and the grouped Colombian form 1.020.123.456.
+
+    ISO dates and datetimes are excluded outright: passport EXPIRY is data this
+    system deliberately keeps.
     """
-    if _ISO_DATE_RE.match(token):
+    token = token.strip(".-")
+    if not token or _ISO_DATE_RE.match(token):
         return False
-    return len(token) >= 5 and sum(c.isdigit() for c in token) >= 2
+    groups = [g for g in re.split(r"[.\-]", token) if g]
+    if any(sum(c.isdigit() for c in g) >= _MIN_DIGITS_IN_GROUP for g in groups):
+        return True
+    # Grouped form: short groups, long total, and made only of digit groups
+    # (so "fee USD 130-165" -- two groups, 6 digits -- stays below the bar).
+    if len(groups) >= 3 and all(g.isdigit() for g in groups):
+        return sum(len(g) for g in groups) >= _MIN_DIGITS_TOTAL_GROUPED
+    return False
 
 
-def _find_document_spans(text: str) -> list[tuple[int, int]]:
-    """Spans of document-number tokens sitting just after a document label."""
+#: In STRICT mode a document number must be the label's own value: at most one
+#: filler word may sit between them. That admits "Passport number: X" and the
+#: slugified "Passport-number-X", while leaving "Bring passport; booking ref
+#: ABC123456" and "Passport office room 12345" alone -- two filler words mean
+#: the number belongs to a different noun.
+_MAX_FILLER_WORDS = 1
+_FILLER_RE = re.compile(r"^[\s:=#.\-]*([A-Za-z]{1,12})(?=[\s:=#.\-])")
+
+
+def _find_document_spans(text: str, *, strict: bool = False) -> list[tuple[int, int]]:
+    """Spans of document-number tokens sitting just after a document label.
+
+    Two strictnesses, because the two sinks have opposite failure costs. The
+    AUDIT LOG scans a wide window: an over-redaction there costs one degraded
+    log line. The VAULT is strict: a false positive raises a hard exception and
+    refuses the user's own note, so a number is only a document number when it
+    is unmistakably that label's value.
+    """
     spans: list[tuple[int, int]] = []
     for label in _DOC_LABEL_RE.finditer(text):
         window = text[label.end():label.end() + _LABEL_PROXIMITY]
         for tok in _TOKEN_RE.finditer(window):
-            if _looks_like_document_number(tok.group(0)):
-                spans.append((label.end() + tok.start(), label.end() + tok.end()))
+            if not _looks_like_document_number(tok.group(0)):
+                continue
+            if strict:
+                gap = window[:tok.start()]
+                fillers = 0
+                while (m := _FILLER_RE.match(gap)):
+                    fillers += 1
+                    gap = gap[m.end():]
+                if fillers > _MAX_FILLER_WORDS or gap.strip(" :=#.-\t"):
+                    continue
+            spans.append((label.end() + tok.start(), label.end() + tok.end()))
     return spans
 
 
@@ -151,11 +199,11 @@ def redact_labelled_documents(text: str) -> str:
 
 
 def contains_labelled_document(text: Any) -> bool:
-    """True when free text carries a document number next to a document label."""
-    return isinstance(text, str) and bool(_find_document_spans(text))
+    """STRICT test used by the vault write boundary (raises a hard exception)."""
+    return isinstance(text, str) and bool(_find_document_spans(text, strict=True))
 
 
-def find_document_violations(obj: Any, _path: str = "") -> list[str]:
+def find_document_violations(obj: Any, _path: str = "", _seen: set[int] | None = None) -> list[str]:
     """Every document-number disclosure anywhere inside a nested structure.
 
     Walks to arbitrary depth. A shallow check over top-level values only is not
@@ -164,6 +212,13 @@ def find_document_violations(obj: Any, _path: str = "") -> list[str]:
     top-level scan never looks. Returns human-readable locations, empty when
     clean.
     """
+    # A self-referential structure previously recursed until RecursionError,
+    # which inside record() was swallowed and dropped the whole audit line.
+    _seen = set() if _seen is None else _seen
+    if isinstance(obj, (dict, list, tuple, set, frozenset)) or hasattr(obj, "__dict__"):
+        if id(obj) in _seen:
+            return []
+        _seen = _seen | {id(obj)}
     hits: list[str] = []
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -171,15 +226,15 @@ def find_document_violations(obj: Any, _path: str = "") -> list[str]:
             if v is not None and is_document_number_key(k):
                 hits.append(f"key {where!r}")
             else:
-                hits.extend(find_document_violations(v, where))
+                hits.extend(find_document_violations(v, where, _seen))
     elif isinstance(obj, (list, tuple, set, frozenset)):
         for i, v in enumerate(obj):
-            hits.extend(find_document_violations(v, f"{_path}[{i}]"))
+            hits.extend(find_document_violations(v, f"{_path}[{i}]", _seen))
     elif isinstance(obj, str):
-        if _find_document_spans(obj):
+        if _find_document_spans(obj, strict=True):
             hits.append(f"labelled number in {_path or 'text'!r}")
     elif hasattr(obj, "__dict__"):
-        hits.extend(find_document_violations(vars(obj), _path))
+        hits.extend(find_document_violations(vars(obj), _path, _seen))
     return hits
 
 
@@ -210,7 +265,7 @@ def is_document_number_key(key: Any) -> bool:
     return _normalize_key(key) in _DOCUMENT_NUMBER_KEYS
 
 
-def sanitize_payload(obj: Any) -> Any:
+def sanitize_payload(obj: Any, _seen: frozenset[int] = frozenset()) -> Any:
     """Recursively sanitize a dict/list/str payload for the audit io field.
 
     Two independent passes. Values under an identity-document key are dropped
@@ -218,22 +273,29 @@ def sanitize_payload(obj: Any) -> Any:
     None rather than becoming a redaction marker, so "field not supplied" and
     "field supplied and withheld" stay distinguishable in the audit trail.
     """
+    # Cycle guard: a self-referential payload used to recurse until
+    # RecursionError, which record()'s broad except swallowed -- dropping the
+    # entire audit line, the exact silent failure this function exists to end.
+    if isinstance(obj, (dict, list, tuple, set, frozenset)) or hasattr(obj, "__dict__"):
+        if id(obj) in _seen:
+            return "***CYCLE***"
+        _seen = _seen | {id(obj)}
     if isinstance(obj, dict):
         return {
             # A sensitive key is redacted WHOLESALE. Recursing into its value
             # would let {"passport_details": {"number": ...}} survive, because
             # the inner key is innocuous on its own.
             k: (_REDACTED if _is_sensitive_key(k) and v is not None
-                else sanitize_payload(v))
+                else sanitize_payload(v, _seen))
             for k, v in obj.items()
         }
     # tuple and set are NOT dict/list/str. Returning them unrecursed let their
     # contents reach the log unsanitised while json.dumps rendered them as an
     # ordinary array -- on-disk identical to a sanitised list, opposite meaning.
     if isinstance(obj, (list, tuple)):
-        return [sanitize_payload(v) for v in obj]
+        return [sanitize_payload(v, _seen) for v in obj]
     if isinstance(obj, (set, frozenset)):
-        return [sanitize_payload(v) for v in sorted(obj, key=repr)]
+        return [sanitize_payload(v, _seen) for v in sorted(obj, key=repr)]
     if isinstance(obj, str):
         return sanitize_error(obj)
     if isinstance(obj, (int, float, bool)) or obj is None:
@@ -243,7 +305,7 @@ def sanitize_payload(obj: Any) -> Any:
     # AUDIT LINE with no error. Degrade to a sanitised string instead: a
     # less-precise line beats a silently missing one.
     if hasattr(obj, "__dict__"):
-        return sanitize_payload(vars(obj))
+        return sanitize_payload(vars(obj), _seen)
     return sanitize_error(repr(obj))
 
 

@@ -17,6 +17,7 @@ destroying the tool.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -278,11 +279,14 @@ def test_no_tool_can_land_a_document_number_in_either_sink(travel_vault):
     tools = _collect_tools()
     assert len(tools) >= 20, f"tool sweep collected only {len(tools)} tools"
 
-    attempted = 0
+    attempted = reached = 0
     for _name, fn, sig in tools:
+        # `dict[str, Any]` contains the substring "str", so a naive check
+        # injected a plain string where a dict was required and the call died in
+        # validation -- counted as a pass while never reaching the guard.
         str_params = [
             n for n, p in sig.parameters.items()
-            if "str" in str(p.annotation) or p.annotation is str
+            if re.fullmatch(r"str( \| None)?", str(p.annotation).replace("typing.", ""))
         ]
         for target in str_params:
             kwargs = {}
@@ -296,10 +300,18 @@ def test_no_tool_can_land_a_document_number_in_either_sink(travel_vault):
             attempted += 1
             try:
                 fn(**kwargs)
+            except profile.IdentityDocumentRejected:
+                reached += 1
             except Exception:
-                pass  # refusal or unrelated validation error: both are fine
+                pass  # unrelated validation error: does not prove anything
 
-    assert attempted > 40, f"sweep only attempted {attempted} injections"
+    # Count injections that actually REACHED the guard. Counting bare attempts
+    # let 91 of 123 die on unrelated validation and still report success, so the
+    # sweep would have stayed green with the guard removed from write_data_doc.
+    assert reached >= 12, (
+        f"only {reached}/{attempted} injections reached the guard; the sweep is "
+        f"not exercising the write boundary"
+    )
 
     # The only thing that matters: did the number reach a sink?
     leaked_files = [
@@ -315,13 +327,13 @@ def test_the_tool_the_model_is_told_to_use_refuses_a_passport(travel_vault):
     import server
 
     profile.ensure_dirs()
-    with pytest.raises(Exception):
+    with pytest.raises(profile.IdentityDocumentRejected):
         server.update_travel_profile_section("1. Identity", LABELLED)
 
     assert FAKE_PASSPORT not in profile.profile_path().read_text(encoding="utf-8")
     audit_file = travel_vault / "audit.jsonl"
-    if audit_file.exists():
-        assert FAKE_PASSPORT not in audit_file.read_text(encoding="utf-8")
+    assert audit_file.exists(), "audit sink never created; the assertion below would not run"
+    assert FAKE_PASSPORT not in audit_file.read_text(encoding="utf-8")
 
 
 def test_companion_body_arm_is_guarded_not_just_fields(travel_vault):
@@ -387,3 +399,88 @@ def test_labelled_prose_redacted_but_flight_numbers_survive(travel_vault):
     assert FAKE_PASSPORT not in cleaned["note"]
     assert "AA1234" in cleaned["note"], "flight number was corrupted"
     assert "X7K2QP" in cleaned["note"], "PNR was corrupted"
+
+
+
+# --------------------------------------------------------------------------
+# 8. OVER-BLOCKING. A false positive here raises a hard exception and refuses
+#    the user's own note, so these matter as much as the containment tests.
+#    The earlier fixtures all put identifiers BEFORE the label, which is
+#    structurally outside a forward-scanning window -- they could not fail.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "Passport check at gate, flight AA1234",        # identifier AFTER the label
+    "Passport ready. PNR X7K2QP",
+    "Bring passport; booking ref ABC123456",
+    "passport + boarding pass, seat 12A, flight UA0987",
+    "Japan: passport 90-day validity rule applies",
+    "Schengen: passport 180-day rolling window",
+    "Renew passport - fee USD 130-165",
+    "national id required, see form DS-11",
+    "passport appointment 2026-04-12T09:30",
+    "Passport office room 12345, Bogota",
+    "passport expires 2029-04-12",
+    "passport must have 6 months validity",
+])
+def test_legitimate_travel_prose_is_not_refused(travel_vault, text):
+    import profile
+
+    profile.ensure_dirs()
+    profile.save_trip("legit-trip", "summary", text)      # must not raise
+
+
+@pytest.mark.parametrize("slug", [
+    "passport-renewal-2026", "passport-run-2027",
+    "visa-and-passport-prep-2026", "cedula-renewal-2026", "ssn-paperwork-2026",
+])
+def test_document_themed_slugs_are_not_refused(travel_vault, slug):
+    """A passport-renewal trip is an ordinary trip and must be saveable."""
+    import profile
+
+    profile.ensure_dirs()
+    profile.save_trip(slug, "summary", "body")           # must not raise
+
+
+@pytest.mark.parametrize("text", [
+    "Passport check at gate, flight AA1234",
+    "Japan: passport 90-day validity rule applies",
+])
+def test_itinerary_identifiers_survive_the_audit_log_after_a_label(travel_vault, text):
+    import audit
+
+    assert "REDACTED" not in audit.sanitize_error(text)
+
+
+def test_grouped_colombian_cedula_is_caught(travel_vault):
+    """1.020.123.456 is how a cedula is actually written."""
+    import audit
+
+    assert audit.contains_labelled_document("Cedula: 1.020.123.456")
+
+
+def test_legacy_stored_number_is_stripped_not_repersisted(travel_vault):
+    import profile
+
+    profile.ensure_dirs()
+    path = profile._companion_path("Legacy Person")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"---\ntype: travel_companion\nname: Legacy Person\n"
+        f"passport: {FAKE_PASSPORT}\n---\n\nbody\n", encoding="utf-8")
+
+    result = profile.upsert_companion("Legacy Person", {"ktn": "TT1234567"})
+
+    assert FAKE_PASSPORT not in path.read_text(encoding="utf-8")
+    assert "passport" in result["removed_identity_fields"]
+    assert "TT1234567" in path.read_text(encoding="utf-8")
+
+
+def test_cyclic_payload_does_not_crash_or_drop_the_audit_line(travel_vault):
+    import audit
+
+    d = {}
+    d["self"] = d
+    with audit.timed("t_cycle", input_payload={"d": d}) as ctx:
+        ctx["output"] = {"ok": True}
+    assert "t_cycle" in (travel_vault / "audit.jsonl").read_text(encoding="utf-8")
