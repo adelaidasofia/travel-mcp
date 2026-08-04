@@ -54,7 +54,9 @@ def sanitize_error(text: Any) -> str:
     cleaned = text
     for pattern, replacement in _SCRUB_PATTERNS:
         cleaned = pattern.sub(replacement, cleaned)
-    return cleaned
+    # Free text carries document numbers no key can announce; an exception
+    # message is free text too.
+    return redact_labelled_documents(cleaned)
 
 
 # Field names whose VALUE is identity-document PII whatever its shape.
@@ -67,8 +69,20 @@ def sanitize_error(text: Any) -> str:
 # Government document NUMBERS. These have no legitimate home in either sink:
 # nothing in this system reads them, and a stored one is pure liability.
 _DOCUMENT_NUMBER_KEYS: frozenset[str] = frozenset({
-    "passport", "passport_number", "passport_no", "passportnumber",
-    "national_id", "ssn", "tax_id", "id_number",
+    # passport, and the spellings a caller actually reaches for
+    "passport", "passport_number", "passport_no", "passport_num",
+    "passport_id", "passport_details", "passport2", "passport_2",
+    "second_passport", "second_passport_number", "passport_number_2",
+    # generic document
+    "document_number", "doc_number", "id_number", "id_no",
+    "identity_document", "identity_number",
+    # national / tax identifiers, US
+    "national_id", "national_id_number", "national_identity_number",
+    "ssn", "social_security", "social_security_number", "tax_id", "tin",
+    # LatAm national + tax documents. The primary traveler here is a dual
+    # Colombian/US national, so these are the expected case, not an exotic one.
+    "cedula", "cedula_de_ciudadania", "dni", "nit", "curp", "rfc",
+    "pasaporte", "numero_de_pasaporte", "documento", "documento_de_identidad",
 })
 
 # The audit set is deliberately WIDER than the vault set. An operational log
@@ -85,10 +99,100 @@ _SENSITIVE_KEYS: frozenset[str] = _DOCUMENT_NUMBER_KEYS | frozenset({
 _REDACTED = "***REDACTED***"
 
 
+# A document number written into PROSE or into a FILENAME, where no key names
+# it. Detection is label PROXIMITY plus a document-shaped token, not a shape
+# regex alone: a bare shape match would eat flight numbers and PNRs. An earlier
+# version required an explicit ":" separator and therefore missed both
+# "passport stamp AN7734512" and the slugified filename form
+# "Passport-number-AN7734512", where every separator has collapsed to a hyphen.
+_DOC_LABEL_RE = re.compile(
+    r"(?i)\b(passports?|pasaportes?|c[ée]dulas?|dni|nit|curp|rfc|ssn|"
+    r"social\s+security|national\s+id|tax\s+id|documento)\b"
+)
+_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-]{4,}")
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+#: How far past a document label a number still counts as that label's value.
+#: Wide enough for "passport number is X" and for a slugified filename where
+#: every separator has collapsed to a hyphen; narrow enough that an unrelated
+#: number later in the same paragraph is not swept up.
+_LABEL_PROXIMITY = 40
+
+
+def _looks_like_document_number(token: str) -> bool:
+    """A token shaped like a document number rather than a word or a date.
+
+    Requires digits, so prose after the label ("passport validity", "issuing
+    country") is untouched. Excludes ISO dates, because passport EXPIRY is data
+    this system deliberately keeps.
+    """
+    if _ISO_DATE_RE.match(token):
+        return False
+    return len(token) >= 5 and sum(c.isdigit() for c in token) >= 2
+
+
+def _find_document_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of document-number tokens sitting just after a document label."""
+    spans: list[tuple[int, int]] = []
+    for label in _DOC_LABEL_RE.finditer(text):
+        window = text[label.end():label.end() + _LABEL_PROXIMITY]
+        for tok in _TOKEN_RE.finditer(window):
+            if _looks_like_document_number(tok.group(0)):
+                spans.append((label.end() + tok.start(), label.end() + tok.end()))
+    return spans
+
+
+def redact_labelled_documents(text: str) -> str:
+    """Redact a document number that free text puts next to its own label."""
+    spans = _find_document_spans(text)
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + _REDACTED + text[end:]
+    return text
+
+
+def contains_labelled_document(text: Any) -> bool:
+    """True when free text carries a document number next to a document label."""
+    return isinstance(text, str) and bool(_find_document_spans(text))
+
+
+def find_document_violations(obj: Any, _path: str = "") -> list[str]:
+    """Every document-number disclosure anywhere inside a nested structure.
+
+    Walks to arbitrary depth. A shallow check over top-level values only is not
+    enough: frontmatter routinely carries a LIST OF DICTS (the been-there ledger
+    stores `records: [{...}]`), so the disclosure sits two levels down where a
+    top-level scan never looks. Returns human-readable locations, empty when
+    clean.
+    """
+    hits: list[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            where = f"{_path}.{k}" if _path else str(k)
+            if v is not None and is_document_number_key(k):
+                hits.append(f"key {where!r}")
+            else:
+                hits.extend(find_document_violations(v, where))
+    elif isinstance(obj, (list, tuple, set, frozenset)):
+        for i, v in enumerate(obj):
+            hits.extend(find_document_violations(v, f"{_path}[{i}]"))
+    elif isinstance(obj, str):
+        if _find_document_spans(obj):
+            hits.append(f"labelled number in {_path or 'text'!r}")
+    elif hasattr(obj, "__dict__"):
+        hits.extend(find_document_violations(vars(obj), _path))
+    return hits
+
+
+def _split_camel(text: str) -> str:
+    """passportNo -> passport_no, so camelCase cannot smuggle a known key past."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", text)
+
+
 def _normalize_key(key: Any) -> str | None:
     if not isinstance(key, str):
         return None
-    return key.strip().lower().replace("-", "_").replace(" ", "_")
+    k = _split_camel(key.strip())
+    return re.sub(r"[\s\-]+", "_", k).lower()
 
 
 def _is_sensitive_key(key: Any) -> bool:
@@ -116,15 +220,31 @@ def sanitize_payload(obj: Any) -> Any:
     """
     if isinstance(obj, dict):
         return {
+            # A sensitive key is redacted WHOLESALE. Recursing into its value
+            # would let {"passport_details": {"number": ...}} survive, because
+            # the inner key is innocuous on its own.
             k: (_REDACTED if _is_sensitive_key(k) and v is not None
                 else sanitize_payload(v))
             for k, v in obj.items()
         }
-    if isinstance(obj, list):
+    # tuple and set are NOT dict/list/str. Returning them unrecursed let their
+    # contents reach the log unsanitised while json.dumps rendered them as an
+    # ordinary array -- on-disk identical to a sanitised list, opposite meaning.
+    if isinstance(obj, (list, tuple)):
         return [sanitize_payload(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return [sanitize_payload(v) for v in sorted(obj, key=repr)]
     if isinstance(obj, str):
         return sanitize_error(obj)
-    return obj
+    if isinstance(obj, (int, float, bool)) or obj is None:
+        return obj
+    # Anything else (dataclass, arbitrary object) previously reached json.dumps
+    # untouched, raised TypeError, and record()'s broad except DROPPED THE WHOLE
+    # AUDIT LINE with no error. Degrade to a sanitised string instead: a
+    # less-precise line beats a silently missing one.
+    if hasattr(obj, "__dict__"):
+        return sanitize_payload(vars(obj))
+    return sanitize_error(repr(obj))
 
 
 def classify_error(exc: BaseException) -> str:
@@ -186,7 +306,9 @@ def record(
     try:
         _ensure_dir()
         with AUDIT_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            # default=str so an unforeseen type degrades this FIELD rather than
+            # dropping the whole line through the except below.
+            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
     except Exception:
         # Audit must never break the tool call. Silent failure here is acceptable.
         pass

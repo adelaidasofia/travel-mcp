@@ -165,9 +165,14 @@ def healthcheck() -> dict[str, Any]:
 def get_travel_profile() -> dict[str, Any]:
     """Return the master traveler profile (frontmatter + body) from 🧳 Travel/Profile.md.
 
-    Profile is the source of truth for: name, DOB, passport, KTN, loyalty IDs,
-    credit cards, cabin rules, schedule rules, hotel chains, hard booking rules.
+    Profile is the source of truth for: name, DOB, passport ISSUING COUNTRY and
+    EXPIRY, KTN, loyalty IDs, credit cards, cabin rules, schedule rules, hotel
+    chains, hard booking rules.
     Edit via Obsidian directly OR via update_travel_profile_section().
+
+    NEVER write a passport, national ID, cédula or SSN NUMBER here. Border
+    eligibility is decided by issuing country and expiry date; the document
+    number is read by nothing in this system, and the write boundary refuses it.
     """
     with audit.timed("get_travel_profile", input_payload={}) as ctx:
         result = profile_mod.read_profile()

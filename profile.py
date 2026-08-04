@@ -257,6 +257,7 @@ def update_profile_section(section_heading: str, new_content: str) -> dict[str, 
     The new_content goes BELOW the heading line. Adjacent sections are preserved.
     Creates the section at end-of-file if it doesn't exist.
     """
+    guard_vault_write({"section_heading": section_heading}, new_content)
     pp = profile_path()
     if pp is None:
         raise RuntimeError(f"{VAULT_ENV} unset; cannot update profile")
@@ -323,31 +324,52 @@ class IdentityDocumentRejected(ValueError):
     """Raised when a caller tries to persist an identity-document number."""
 
 
-def reject_identity_documents(fields: dict[str, Any]) -> None:
+def guard_vault_write(
+    meta: dict[str, Any] | None = None,
+    *texts: Any,
+) -> None:
     """Fail loud before any identity-document number reaches the vault.
 
-    The tool signature is the first line of defence, but a signature can be
-    widened by the next change and nothing would notice. This is the write
-    boundary itself, so it holds regardless of how the caller was spelled.
+    Called by EVERY vault write primitive in this module. An earlier version
+    guarded only `upsert_companion` while claiming in its own docstring to be
+    "the write boundary itself" -- it was the boundary of one function out of
+    four, and the other three were the sinks for six modules. A guard is only
+    as wide as its call sites, never as wide as its docstring.
+
+    A number arrives four ways, so the walk is recursive and covers all of them:
+      1. a frontmatter KEY that names a document (`passport`, `cedula`, ...),
+      2. a document number written into a frontmatter VALUE as prose,
+      3. a document number written into free-text BODY content,
+      4. the same, NESTED -- the been-there ledger stores `records: [{...}]`,
+         so a scan of top-level values only leaves it sitting two levels down.
+
+    Identifiers that become FILENAMES (`name`, `slug`, `relpath`) are passed in
+    as text too: slugifying "Passport number: X" produced a file literally
+    called `Passport-number-X.md`, a leak in the directory listing itself.
+
     Refuses document NUMBERS only. Date of birth and Known Traveler Number are
     withheld from the audit log but allowed through to the vault, which is the
     private store where booking flows legitimately need them.
     """
-    offending = sorted(
-        k for k, v in fields.items()
-        if v is not None and audit.is_document_number_key(k)
+    violations = audit.find_document_violations(
+        {"meta": meta or {}, "text": list(texts)}
     )
-    if offending:
+    if violations:
         raise IdentityDocumentRejected(
-            f"refusing to write identity-document field(s) to the vault: "
-            f"{', '.join(offending)}. Border eligibility needs issuing country "
-            f"and expiry date, never the document number. Use "
+            f"refusing to write an identity-document number to the vault "
+            f"({'; '.join(violations[:4])}). Border eligibility needs issuing "
+            f"country and expiry date, never the document number. Use "
             f"passport_country / passport_expiry instead."
         )
 
 
+#: Retained name for the companion path; the guard itself is now module-wide.
+def reject_identity_documents(fields: dict[str, Any]) -> None:
+    guard_vault_write(fields)
+
+
 def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None) -> dict[str, Any]:
-    reject_identity_documents(fields)
+    guard_vault_write(fields, body, name)
     p = _companion_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     post = frontmatter.load(str(p)) if p.exists() else frontmatter.Post(content=body or "")
@@ -375,6 +397,7 @@ def _trip_path(slug: str) -> Path:
 
 def save_trip(slug: str, summary: str, content: str,
               frontmatter_extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    guard_vault_write(frontmatter_extra, content, summary, slug)
     p = _trip_path(slug)
     p.parent.mkdir(parents=True, exist_ok=True)
     post = frontmatter.Post(content=content)
@@ -458,6 +481,7 @@ def read_data_doc(relpath: str) -> dict[str, Any] | None:
 
 
 def write_data_doc(relpath: str, meta: dict[str, Any], body: str) -> dict[str, Any]:
+    guard_vault_write(meta, body, relpath)
     p = _data_doc_path(relpath)
     p.parent.mkdir(parents=True, exist_ok=True)
     post = frontmatter.Post(content=body)
