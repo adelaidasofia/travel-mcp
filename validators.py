@@ -236,7 +236,7 @@ def validate_weekdays(values: Any, *, field: str = "days") -> tuple[str, ...]:
 def coerce_iso_date(value: Any, *, field: str = "date") -> str:
     """Accept an ISO string, a date, or a datetime and return 'YYYY-MM-DD'.
 
-    Hand-edited YAML yields real `date` objects for unquoted `2026-10-08`, so
+    Hand-edited YAML yields real `date` objects for an unquoted `YYYY-MM-DD`, so
     every load path coerces rather than assuming the writer's quoting survived.
     """
     if isinstance(value, datetime):

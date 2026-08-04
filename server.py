@@ -618,6 +618,10 @@ def save_itinerary(
     with audit.timed("save_itinerary",
                      input_payload={"slug": trip.slug, "window": [trip.window_start, trip.window_end],
                                     "segments": len(trip.segments)}) as ctx:
+        # Candidate segments are PROPOSALS, so they clear the eligibility gate
+        # before they can land. Locked and planned segments are facts and pass
+        # through untouched.
+        eligibility_mod.guard_proposed_countries(trip.proposed_countries())
         written = itinerary_mod.save(trip)
         out = {
             **written,
@@ -668,7 +672,12 @@ def add_itinerary_segment(
     """Append one segment to an existing itinerary and re-sort by arrival date.
 
     Returns the recomputed open windows so the caller sees immediately what the
-    new segment consumed. Overlaps are reported, never silently merged.
+    new segment consumed, plus any overlap conflicts and any segment that fell
+    outside the trip window. Overlaps are reported, never silently merged.
+
+    A `candidate` segment is a PROPOSAL, so its country must be verified-eligible
+    first; `locked` and `planned` record a decision already made and are stored
+    as given.
     """
     segment = itinerary_mod.Segment.build(
         city=city, country=country, arrive=arrive, depart=depart,
@@ -676,6 +685,8 @@ def add_itinerary_segment(
     )
     with audit.timed("add_itinerary_segment",
                      input_payload={"slug": slug, "segment": segment.to_dict()}) as ctx:
+        if segment.status == itinerary_mod.PROPOSAL_STATUS:
+            eligibility_mod.guard_proposed_countries([segment.country])
         trip = itinerary_mod.load(slug).with_segment(segment)
         written = itinerary_mod.save(trip)
         out = {
@@ -683,6 +694,9 @@ def add_itinerary_segment(
             "trip": trip.to_dict(),
             "open_windows": [w.to_dict() for w in trip.open_windows()],
             "conflicts": trip.conflicts(),
+            # Same shape as save_itinerary / get_itinerary. Omitting it let a
+            # segment land wholly outside the window and still look clean.
+            "out_of_window": trip.out_of_window(),
         }
         ctx["output"] = {"slug": trip.slug, "segments": len(trip.segments)}
         return out
@@ -699,12 +713,15 @@ def itinerary_open_windows(slug: str, include_candidates: bool = False) -> dict[
     By default only `locked` and `planned` segments consume time — a `candidate`
     is a proposal to FILL a window, so it must not eat one. Pass
     include_candidates=true to see what the window looks like if every candidate
-    were accepted.
+    were accepted; that answer PROPOSES those countries, so it is refused unless
+    every one of them is verified-eligible.
     """
     statuses = ("locked", "planned", "candidate") if include_candidates else itinerary_mod.COMMITTED_STATUSES
     with audit.timed("itinerary_open_windows",
                      input_payload={"slug": slug, "include_candidates": include_candidates}) as ctx:
         trip = itinerary_mod.load(slug)
+        if include_candidates:
+            eligibility_mod.guard_proposed_countries(trip.proposed_countries())
         windows = trip.open_windows(statuses)
         out = {
             "slug": trip.slug,
@@ -738,6 +755,10 @@ def plan_window_packing(
 
     discretionary_hours defaults to the saved preference profile's daily figure.
     overhead_days is the travel/transition cost between two places.
+
+    include_candidates=true packs the windows as if every candidate were
+    accepted. That output PROPOSES those countries, so it is refused unless every
+    one of them is verified-eligible.
     """
     hours_per_day = discretionary_hours
     if hours_per_day is None:
@@ -748,6 +769,8 @@ def plan_window_packing(
                                     "overhead_days": overhead_days}) as ctx:
         trip = itinerary_mod.load(slug)
         statuses = ("locked", "planned", "candidate") if include_candidates else itinerary_mod.COMMITTED_STATUSES
+        if include_candidates:
+            eligibility_mod.guard_proposed_countries(trip.proposed_countries())
         estimate = dwell_mod.estimate(
             trip.title, completionism=completionism, discretionary_hours=hours_per_day,
             hours_of_interest=hours_of_interest, hours_low=hours_low, hours_high=hours_high,

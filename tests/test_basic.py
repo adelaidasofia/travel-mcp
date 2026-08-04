@@ -145,6 +145,64 @@ def test_audit_record_writes_jsonl(tmp_path, monkeypatch):
     assert rec["error_class"] is None
 
 
+def test_classify_error_walks_the_mro_instead_of_the_leaf_name(tmp_path):
+    """NEGATIVE CONTROL: a new exception type must not read as an upstream fault.
+
+    Dispatch used to match the exact leaf type name, so every exception type
+    added after it was written fell through to `upstream_error` — on a surface
+    that makes no upstream call at all. Then the taxonomy said "the provider
+    broke" when the caller had passed a country nobody had verified.
+    """
+    import audit
+    import eligibility
+    import prereqs
+    import validators as V
+
+    cases = {
+        eligibility.EligibilityRefused("Country B", "verified-ineligible",
+                                       "verified-ineligible"): "policy_refusal",
+        prereqs.PrerequisiteCycleError("a depends on b depends on a"): "validation",
+        prereqs.UnknownPrerequisiteError("depends on unknown 'x'"): "validation",
+        V.ValidationError("bad IATA"): "validation",
+        ValueError("plain"): "validation",
+    }
+    assert {type(e).__name__: audit.classify_error(e) for e in cases} == {
+        type(e).__name__: want for e, want in cases.items()
+    }
+    # The pre-existing classes keep their class: no silent reshuffle.
+    assert audit.classify_error(TimeoutError("slow")) == "timeout"
+    assert audit.classify_error(FileNotFoundError("gone")) == "filesystem"
+    assert audit.classify_error(PermissionError("nope")) == "filesystem"
+    assert audit.classify_error(RuntimeError("auth failed")) == "auth"
+    assert audit.classify_error(RuntimeError("boom")) == "internal_error"
+    # POSITIVE CONTROL: a genuinely unknown, non-derived failure still maps to
+    # upstream_error, so the bucket is not simply unreachable now.
+    assert audit.classify_error(Exception("provider returned garbage")) == "upstream_error"
+
+
+def test_a_refused_proposal_is_audited_as_a_policy_refusal(tmp_path):
+    """The classification has to survive the real tool path, not just a unit call."""
+    import eligibility
+    import server
+
+    def fn(name):
+        tool = getattr(server, name)
+        return getattr(tool, "fn", tool)
+
+    fn("save_itinerary")(slug="t", title="T", window_start="2030-03-01",
+                         window_end="2030-05-30", segments=[])
+    with pytest.raises(eligibility.EligibilityRefused):
+        fn("add_itinerary_segment")(slug="t", city="Placeholder City",
+                                    country="Country Z", arrive="2030-03-04",
+                                    depart="2030-03-09", status="candidate")
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "audit.log.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    refusals = [r for r in records if r["tool"] == "add_itinerary_segment"]
+    assert [r["error_class"] for r in refusals] == ["policy_refusal"]
+
+
 def test_profile_ensure_dirs_seeds_template(tmp_path):
     import profile
     status = profile.ensure_dirs()

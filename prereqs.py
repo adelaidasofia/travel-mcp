@@ -16,8 +16,9 @@ Scheduling runs backward from the departure date:
     start_by    = complete_by - lead_days
 
 Dependents therefore have to be solved before their dependencies, which is
-reverse topological order. A dependency cycle raises instead of looping, and an
-unknown dependency key raises instead of being skipped: a prerequisite silently
+reverse topological order. A dependency cycle raises instead of looping, an
+unknown dependency key raises instead of being skipped, and two entries under
+one key raise a duplicate-key error naming the key: a prerequisite silently
 dropped from a schedule is the failure this module exists to prevent.
 """
 
@@ -137,8 +138,23 @@ class ScheduledPrerequisite:
         }
 
 
+def _assert_unique_keys(prereqs: tuple[Prerequisite, ...]) -> None:
+    """Two entries under one key is a caller mistake; say so by name.
+
+    Runs BEFORE the topological sort. `_reverse_topological` keys its graph by
+    `key`, so a duplicate silently collapses two entries into one and the length
+    check at the end mismatches — reporting `dependency cycle among: []`, a cycle
+    error naming nothing stuck. Catching it here keeps the message true.
+    """
+    keys = [p.key for p in prereqs]
+    if len(set(keys)) != len(keys):
+        dupes = sorted({k for k in keys if keys.count(k) > 1})
+        raise V.ValidationError(f"duplicate prerequisite keys: {dupes}")
+
+
 def _reverse_topological(prereqs: tuple[Prerequisite, ...]) -> list[Prerequisite]:
-    """Dependents first. Raises on a cycle or an unknown key."""
+    """Dependents first. Raises on a duplicate key, a cycle or an unknown key."""
+    _assert_unique_keys(prereqs)
     by_key = {p.key: p for p in prereqs}
     for p in prereqs:
         for dep in p.depends_on:
@@ -175,10 +191,7 @@ def schedule_backward(prereqs: Any, departure: Any, *, today: Any = None,
         p if isinstance(p, Prerequisite) else Prerequisite.from_dict(p)
         for p in (prereqs or ())
     )
-    keys = [p.key for p in built]
-    if len(set(keys)) != len(keys):
-        dupes = sorted({k for k in keys if keys.count(k) > 1})
-        raise V.ValidationError(f"duplicate prerequisite keys: {dupes}")
+    _assert_unique_keys(built)
     departure_iso = V.coerce_iso_date(departure, field="departure")
     warn = V.validate_non_negative_int(warn_days, field="warn_days", maximum=365)
     today_iso = V.coerce_iso_date(today, field="today") if today is not None else time.strftime("%Y-%m-%d")

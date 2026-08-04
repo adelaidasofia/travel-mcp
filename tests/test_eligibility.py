@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pytest
 
 
@@ -64,6 +66,83 @@ def test_stale_verification_stops_being_proposable(travel_vault):
     ok, reason, _ = store.check_proposable("Country A", now="2027-08-01", max_age_days=30)
     assert ok is False
     assert reason == "stale-verification"
+
+
+def test_an_as_of_in_the_future_is_refused_not_treated_as_fresh(travel_vault):
+    """NEGATIVE CONTROL: a typo'd future date must not read as permanently fresh.
+
+    `age_days` goes NEGATIVE for a future as_of, and `age > max_age_days` can
+    never fire on a negative number — so without an explicit check this record
+    would be proposable forever, which is the exact lie the module prevents.
+    """
+    import eligibility
+    store = eligibility.EligibilityStore((
+        eligibility.EligibilityRecord.build(
+            "Country A", "verified-eligible", source="portal", as_of="2030-01-01",
+        ),
+    ))
+    assert store.get("Country A").age_days(now="2026-08-03") < 0
+    ok, reason, _ = store.check_proposable("Country A", now="2026-08-03", max_age_days=30)
+    assert (ok, reason) == (False, "future-verification")
+    # Refused even with no freshness ceiling asked for: it never happened.
+    assert store.check_proposable("Country A", now="2026-08-03")[:2] == (False, "future-verification")
+    with pytest.raises(eligibility.EligibilityRefused):
+        store.assert_proposable("Country A", now="2026-08-03")
+
+
+def test_set_state_refuses_a_future_as_of_at_the_write_boundary(travel_vault):
+    """The typo is caught where it can still be corrected."""
+    import eligibility
+    import validators as V
+    future = (date.today() + timedelta(days=400)).isoformat()
+    with pytest.raises(V.ValidationError) as exc:
+        eligibility.EligibilityStore().set_state(
+            "Country A", "verified-eligible", source="portal", as_of=future,
+        )
+    assert future in str(exc.value)
+    # POSITIVE CONTROL: today and any past date still write.
+    today = date.today().isoformat()
+    store = eligibility.EligibilityStore().set_state(
+        "Country A", "verified-eligible", source="portal", as_of=today,
+    )
+    assert store.get("Country A").as_of == today
+
+
+# =====================================================================
+# The gate is a CHOKEPOINT, not an opt-in helper
+# =====================================================================
+
+def test_guard_raises_on_the_first_country_that_may_not_be_proposed(travel_vault):
+    import eligibility
+    store = _store(eligibility)
+    with pytest.raises(eligibility.EligibilityRefused) as exc:
+        eligibility.guard_proposed_countries(
+            ["Country A", "Country B", "Country Z"], store=store,
+        )
+    assert exc.value.state == "verified-ineligible"
+    with pytest.raises(eligibility.EligibilityRefused) as unchecked:
+        eligibility.guard_proposed_countries(["Country Z"], store=store)
+    assert unchecked.value.reason == "unchecked"
+
+
+def test_guard_passes_verified_eligible_and_no_ops_on_an_empty_list(travel_vault):
+    """POSITIVE CONTROL — the gate must let real proposals through."""
+    import eligibility
+    store = _store(eligibility)
+    records = eligibility.guard_proposed_countries(["Country A"], store=store)
+    assert [r.state for r in records] == ["verified-eligible"]
+    assert eligibility.guard_proposed_countries([], store=store) == ()
+    assert eligibility.guard_proposed_countries(None, store=store) == ()
+
+
+def test_guard_reads_the_saved_store_when_none_is_passed(travel_vault):
+    """No store argument means the gate loads from disk, so a caller cannot
+    accidentally check against an empty in-memory one."""
+    import eligibility
+    eligibility.save(_store(eligibility))
+    assert eligibility.guard_proposed_countries("Country A")[0].state == "verified-eligible"
+    with pytest.raises(eligibility.EligibilityRefused):
+        eligibility.guard_proposed_countries("Country B")
 
 
 # =====================================================================

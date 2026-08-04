@@ -18,11 +18,16 @@ OPEN WINDOWS — the boundary convention, stated once so it cannot drift:
   At the edges of the trip window there is no boundary day to give up, so the
   first window starts on window_start and the last ends on window_end.
 
-  Worked example (the ticket's round trip):
-    window 2026-09-17..2026-12-16, locked 2026-10-08..09 and 2026-10-23..27
-      window 1  2026-09-17..2026-10-07  = 21 days
-      window 2  2026-10-10..2026-10-22  = 13 days
-      window 3  2026-10-28..2026-12-16  = 50 days
+  Worked example, written as DAY OFFSETS from the window start. The result is a
+  property of the arithmetic, not of any particular calendar date:
+
+    91-day window (day 0..day 90), locked day 21..22 and day 36..40
+      window 1  day  0..day 20  = 21 days
+      window 2  day 23..day 35  = 13 days
+      window 3  day 41..day 90  = 50 days
+
+    21 + 13 + 50 open days + 2 + 5 anchor days = the whole 91-day window: no day
+    is double-counted and none goes missing.
 
 Two segments touching endpoint-to-endpoint (one departs the day the next
 arrives) is a travel day, not a conflict. Only a strict overlap is a conflict.
@@ -43,6 +48,12 @@ ITINERARY_TYPE = "travel_itinerary"
 #: Statuses that consume calendar time when open windows are computed.
 #: A `candidate` is a proposal to FILL a window, so it must not eat one.
 COMMITTED_STATUSES: tuple[str, ...] = ("locked", "planned")
+
+#: The one status that makes a segment a PROPOSAL rather than a fact. `locked`
+#: and `planned` are things the traveler already committed to; a `candidate` is
+#: this system suggesting a place, so it is the status that must clear the
+#: entry-eligibility gate before it reaches a caller.
+PROPOSAL_STATUS = "candidate"
 
 
 def _d(iso: str) -> date:
@@ -197,18 +208,42 @@ class Trip:
         )
 
     def conflicts(self, statuses: tuple[str, ...] = COMMITTED_STATUSES) -> list[dict[str, Any]]:
-        """Strictly-overlapping committed segments. Endpoint-to-endpoint is a travel day."""
+        """EVERY strictly-overlapping committed pair. Endpoint-to-endpoint is a travel day.
+
+        All pairs, not just adjacent ones: a long segment can swallow several
+        later ones, and reporting only the neighbour would let a caller fix every
+        conflict it was shown and still be double-booked. Segments are sorted by
+        arrival, so once a later segment starts on or after `earlier.depart` no
+        segment after it can overlap `earlier` either — hence the break.
+        """
         out: list[dict[str, Any]] = []
         ordered = self.committed(statuses)
-        # Deliberately unequal lengths: this walks consecutive pairs.
-        for earlier, later in zip(ordered, ordered[1:], strict=False):
-            if _d(later.arrive) < _d(earlier.depart):
+        for i, earlier in enumerate(ordered):
+            earlier_depart = _d(earlier.depart)
+            for later in ordered[i + 1:]:
+                if _d(later.arrive) >= earlier_depart:
+                    break
                 out.append({
                     "first": earlier.to_dict(),
                     "second": later.to_dict(),
-                    "overlap_days": (_d(earlier.depart) - _d(later.arrive)).days,
+                    # Clipped to the shorter segment so a fully-contained stay
+                    # reports its own length, not the container's.
+                    "overlap_days": (
+                        min(earlier_depart, _d(later.depart)) - _d(later.arrive)
+                    ).days,
                 })
         return out
+
+    def proposed_countries(self) -> tuple[str, ...]:
+        """Countries this trip PROPOSES — its candidate segments, de-duplicated.
+
+        The entry-eligibility gate reads this. Locked and planned segments are
+        deliberately excluded: they are facts about a trip already committed to,
+        and refusing to load a booked stay would help nobody.
+        """
+        return tuple(dict.fromkeys(
+            s.country for s in self.segments if s.status == PROPOSAL_STATUS
+        ))
 
     def out_of_window(self) -> list[dict[str, Any]]:
         """Segments falling wholly or partly outside the trip window."""

@@ -8,6 +8,7 @@ would be a silent breaking change for every existing caller.
 from __future__ import annotations
 
 import json
+from datetime import date, timedelta
 
 import pytest
 
@@ -32,13 +33,27 @@ NEW_TOOLS = {
     "save_trip_prerequisites", "prerequisite_schedule",
 }
 
-WINDOW_START = "2026-09-17"
-WINDOW_END = "2026-12-16"
+# Every date below is a DAY OFFSET from a neutral synthetic base: the 21/13/50
+# vector is a property of the arithmetic, not of any real calendar date.
+BASE = date(2030, 3, 1)
+WINDOW_LENGTH_DAYS = 91
+
+
+def day(offset: int) -> str:
+    """ISO date `offset` days after the window start (offset 0 == window start)."""
+    return (BASE + timedelta(days=offset)).isoformat()
+
+
+WINDOW_START = day(0)
+WINDOW_END = day(WINDOW_LENGTH_DAYS - 1)
+#: Anchor 1 opens on day 21 (window 1 = days 0..20 = 21 days) and occupies 2
+#: days; anchor 2 opens on day 36 (window 2 = days 23..35 = 13 days) and
+#: occupies 5, leaving days 41..90 = 50 days.
 ANCHORS = [
-    {"city": "Singapore", "country": "Singapore", "arrive": "2026-10-08",
-     "depart": "2026-10-09", "status": "locked", "scope": "personal"},
-    {"city": "Phuket", "country": "Thailand", "arrive": "2026-10-23",
-     "depart": "2026-10-27", "status": "locked", "scope": "personal"},
+    {"city": "Placeholder City", "country": "Country A", "arrive": day(21),
+     "depart": day(22), "status": "locked", "scope": "personal"},
+    {"city": "Second City", "country": "Country C", "arrive": day(36),
+     "depart": day(40), "status": "locked", "scope": "personal"},
 ]
 
 
@@ -92,7 +107,7 @@ def test_trip_round_trips_through_the_tools_and_returns_21_13_50(travel_vault):
 
     fetched = _fn(server, "get_itinerary")(slug="autumn-window")
     assert [w["days"] for w in fetched["open_windows"]] == [21, 13, 50]
-    assert [s["city"] for s in fetched["trip"]["segments"]] == ["Singapore", "Phuket"]
+    assert [s["city"] for s in fetched["trip"]["segments"]] == [a["city"] for a in ANCHORS]
     assert all(s["scope"] == "personal" for s in fetched["trip"]["segments"])
 
     windows = _fn(server, "itinerary_open_windows")(slug="autumn-window")
@@ -106,7 +121,7 @@ def test_adding_a_segment_recomputes_the_windows(travel_vault):
     _save_anchor_trip(server)
     result = _fn(server, "add_itinerary_segment")(
         slug="autumn-window", city="Placeholder City", country="Country A",
-        arrive="2026-09-20", depart="2026-09-25", status="planned",
+        arrive=day(3), depart=day(8), status="planned",
     )
     assert len(result["trip"]["segments"]) == 3
     assert [w["days"] for w in result["open_windows"]] != [21, 13, 50]
@@ -242,6 +257,139 @@ def test_eligibility_tools_refuse_unchecked_but_still_display_it(travel_vault):
     }
 
 
+def test_a_verified_ineligible_country_cannot_be_PROPOSED_anywhere(travel_vault):
+    """NEGATIVE CONTROL for the chokepoint.
+
+    The exact probe that used to succeed: mark a country verified-ineligible,
+    then propose it as a candidate segment and read it back out of a plan. Every
+    one of those surfaces must refuse now — a gate with one caller is not a gate.
+    """
+    import eligibility
+    import server
+    _save_anchor_trip(server)
+    _fn(server, "set_entry_eligibility")(
+        country="Country B", state="verified-ineligible", source="official portal",
+        as_of="2026-08-01",
+    )
+
+    # 1. A candidate segment is a PROPOSAL, so it never lands.
+    with pytest.raises(eligibility.EligibilityRefused) as exc:
+        _fn(server, "add_itinerary_segment")(
+            slug="autumn-window", city="Placeholder City", country="Country B",
+            arrive=day(3), depart=day(8), status="candidate",
+        )
+    assert exc.value.state == "verified-ineligible"
+    assert len(_fn(server, "get_itinerary")(slug="autumn-window")["trip"]["segments"]) == 2
+
+    # 2. Same refusal on the bulk write.
+    with pytest.raises(eligibility.EligibilityRefused):
+        _fn(server, "save_itinerary")(
+            slug="other-trip", title="Other", window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            segments=[{"city": "Placeholder City", "country": "Country B",
+                       "arrive": day(3), "depart": day(8), "status": "candidate"}],
+        )
+
+    # 3. A candidate stored while the country was still eligible, then refused
+    #    later, must not resurface inside a plan.
+    _fn(server, "set_entry_eligibility")(
+        country="Country B", state="verified-eligible", source="official portal",
+        as_of="2026-08-01",
+    )
+    _fn(server, "add_itinerary_segment")(
+        slug="autumn-window", city="Placeholder City", country="Country B",
+        arrive=day(3), depart=day(8), status="candidate",
+    )
+    _fn(server, "set_entry_eligibility")(
+        country="Country B", state="verified-ineligible", source="official portal",
+        as_of="2026-08-01",
+    )
+    with pytest.raises(eligibility.EligibilityRefused):
+        _fn(server, "itinerary_open_windows")(slug="autumn-window", include_candidates=True)
+    with pytest.raises(eligibility.EligibilityRefused):
+        _fn(server, "plan_window_packing")(
+            slug="autumn-window", hours_of_interest=40, include_candidates=True,
+        )
+
+    # 4. DISPLAY still works: hiding the row would make a recorded no invisible.
+    shown = _fn(server, "get_itinerary")(slug="autumn-window")
+    assert "Country B" in [s["country"] for s in shown["trip"]["segments"]]
+    assert [w["days"] for w in shown["open_windows"]] == [21, 13, 50]
+
+
+def test_an_unchecked_country_cannot_be_proposed_either(travel_vault):
+    """`unchecked` is not a soft yes — the same gate refuses an unknown."""
+    import eligibility
+    import server
+    _save_anchor_trip(server)
+    with pytest.raises(eligibility.EligibilityRefused) as exc:
+        _fn(server, "add_itinerary_segment")(
+            slug="autumn-window", city="Placeholder City", country="Country Z",
+            arrive=day(3), depart=day(8), status="candidate",
+        )
+    assert exc.value.reason == "unchecked"
+
+
+def test_a_verified_eligible_candidate_is_accepted_and_packs(travel_vault):
+    """POSITIVE CONTROL: the gate must not block legitimate proposals.
+
+    Without this the chokepoint could pass its negative tests by refusing
+    everything.
+    """
+    import server
+    _save_anchor_trip(server)
+    _fn(server, "set_entry_eligibility")(
+        country="Country A", state="verified-eligible", source="official portal",
+        as_of="2026-08-01",
+    )
+    added = _fn(server, "add_itinerary_segment")(
+        slug="autumn-window", city="Placeholder City", country="Country A",
+        arrive=day(3), depart=day(8), status="candidate",
+    )
+    assert len(added["trip"]["segments"]) == 3
+    # A candidate does not consume a window, so the vector is unchanged...
+    assert [w["days"] for w in added["open_windows"]] == [21, 13, 50]
+    # ...and counting it in changes the plan without being refused.
+    counted = _fn(server, "itinerary_open_windows")(
+        slug="autumn-window", include_candidates=True,
+    )
+    assert [w["days"] for w in counted["open_windows"]] != [21, 13, 50]
+    packed = _fn(server, "plan_window_packing")(
+        slug="autumn-window", hours_of_interest=40, include_candidates=True,
+    )
+    assert packed["windows"]
+
+
+def test_locked_and_planned_segments_bypass_the_gate_because_they_are_facts(travel_vault):
+    """A booked stay is not a proposal. Refusing it would help nobody."""
+    import server
+    _save_anchor_trip(server)   # both anchors are `locked` and both are unchecked
+    added = _fn(server, "add_itinerary_segment")(
+        slug="autumn-window", city="Placeholder City", country="Country Z",
+        arrive=day(3), depart=day(8), status="planned",
+    )
+    assert len(added["trip"]["segments"]) == 3
+
+
+def test_add_segment_reports_a_segment_that_fell_outside_the_window(travel_vault):
+    """save_itinerary and get_itinerary both return out_of_window; so must this
+    one, or a segment lands outside the trip and the result still looks clean."""
+    import server
+    _save_anchor_trip(server)
+    added = _fn(server, "add_itinerary_segment")(
+        slug="autumn-window", city="Placeholder City", country="Country A",
+        arrive=day(110), depart=day(114), status="planned",
+    )
+    assert [s["arrive"] for s in added["out_of_window"]] == [day(110)]
+    # POSITIVE CONTROL: an in-window add reports an empty list, not a missing key.
+    _save_anchor_trip(server, slug="second-trip")
+    inside = _fn(server, "add_itinerary_segment")(
+        slug="second-trip", city="Placeholder City", country="Country A",
+        arrive=day(3), depart=day(8), status="planned",
+    )
+    assert inside["out_of_window"] == []
+
+
 def test_verified_eligibility_without_a_source_is_refused(travel_vault):
     import server
     import validators as V
@@ -259,11 +407,13 @@ def test_prerequisite_tools_schedule_backward_from_departure(travel_vault):
          "depends_on": ["passport-renewal"]},
     ])
     schedule = _fn(server, "prerequisite_schedule")(
-        trip_slug="autumn-window", departure=WINDOW_START, today="2026-08-01",
+        trip_slug="autumn-window", departure=WINDOW_START, today=day(-47),
     )
     rows = {r["key"]: r for r in schedule["prerequisites"]}
-    assert rows["visa-country-a"]["start_by"] == "2026-08-11"
-    assert rows["passport-renewal"]["start_by"] == "2026-07-21"
+    # visa: complete_by = departure - 7 (hard cutoff), start_by = that - 30 lead
+    assert rows["visa-country-a"]["start_by"] == day(-37)
+    # passport: cannot use its own slack, the visa needs it by day -37
+    assert rows["passport-renewal"]["start_by"] == day(-58)
     assert schedule["overdue"] == ["passport-renewal"]
 
 
@@ -289,8 +439,8 @@ def test_input_rail_rejects_before_the_audited_body_runs(travel_vault):
     import validators as V
     with pytest.raises(V.ValidationError):
         _fn(server, "save_itinerary")(
-            slug="bad-trip", title="Bad", window_start="2026-12-16",
-            window_end="2026-09-17",
+            slug="bad-trip", title="Bad", window_start=WINDOW_END,
+            window_end=WINDOW_START,
         )
     audit_path = travel_vault / "audit.jsonl"
     records = [

@@ -44,9 +44,10 @@ A trip is ORDERED SEGMENTS, not prose. These tools are deterministic and offline
 
 **Structured trips**
 - `save_itinerary` / `get_itinerary` / `list_itineraries` — a trip is segments of `{city, country, arrive, depart, status, scope}`; `status` ∈ locked | planned | candidate, `scope` ∈ personal | company
-- `add_itinerary_segment` — append one segment, re-sort by arrival, recompute windows
+- `add_itinerary_segment` — append one segment, re-sort by arrival, recompute windows, and report any overlap or any segment that fell outside the trip window
 - `itinerary_open_windows` — the unallocated stretches. A segment occupies both its arrive and depart day, so a window runs from (previous depart + 1) to (next arrive − 1). A `candidate` is a proposal to fill a window, so by default it does not consume one.
 - `plan_window_packing` — how many places fit per window: `k_max = floor((L + overhead) / (dwell + overhead))`
+- Overlaps are reported for EVERY overlapping pair, not just adjacent ones: one long stay can swallow several later ones, and fixing only what you were shown would leave you double-booked.
 
 **Dwell time**
 - `dwell_time_estimate` — `days = ceil(H × completionism / discretionary_hours)`, floor of 2. Always returned as a RANGE with a confidence, never a point value: H is an estimate, so a single number would be false precision.
@@ -61,10 +62,11 @@ A trip is ORDERED SEGMENTS, not prose. These tools are deterministic and offline
 - `record_country_inference` / `confirm_country_visit` / `get_been_there_ledger` — per-country provenance (inferred | confirmed | asked | unknown). An inference the traveler did not confirm counts as NOT visited and is committed as such immediately; it is never left pending and never counted as a visit. The rule is re-applied on load, so a hand-edited file cannot forge a visit.
 
 **Entry eligibility**
-- `set_entry_eligibility` / `get_entry_eligibility` / `filter_proposable_countries` — three states (verified-eligible | verified-ineligible | unchecked), each verified state carrying a source and an as-of date. Only verified-eligible may be PROPOSED; `unchecked` is not a soft yes. A UI may still DISPLAY unchecked as unchecked, because hiding an unknown makes it look like a no.
+- `set_entry_eligibility` / `get_entry_eligibility` / `filter_proposable_countries` — three states (verified-eligible | verified-ineligible | unchecked), each verified state carrying a source and an as-of date. Only verified-eligible may be PROPOSED; `unchecked` is not a soft yes, and an as-of date in the future is refused rather than read as permanently fresh. A UI may still DISPLAY unchecked as unchecked, because hiding an unknown makes it look like a no.
+- The gate is a CHOKEPOINT, not an opt-in helper. Every surface that proposes a country runs it: a `candidate` segment on the way in, and any plan counting candidates (`itinerary_open_windows` / `plan_window_packing` with `include_candidates`) on the way out. `locked` and `planned` segments are facts about a trip already committed to, so they pass through untouched.
 
 **Prerequisites**
-- `save_trip_prerequisites` / `prerequisite_schedule` — visas, vaccinations and permits scheduled BACKWARD from departure with lead times and hard cutoffs. A dependency cycle or unknown key is rejected at write time, so an unschedulable graph never lands on disk.
+- `save_trip_prerequisites` / `prerequisite_schedule` — visas, vaccinations and permits scheduled BACKWARD from departure with lead times and hard cutoffs. A dependency cycle, an unknown key or a duplicate key is rejected at write time, so an unschedulable graph never lands on disk.
 
 ## What it does NOT do
 

@@ -69,17 +69,31 @@ def sanitize_payload(obj: Any) -> Any:
 
 
 def classify_error(exc: BaseException) -> str:
-    """Map an exception to a stable error_class for downstream taxonomy."""
-    name = type(exc).__name__
-    if name == "ValidationError" or name == "ValueError":
+    """Map an exception to a stable error_class for downstream taxonomy.
+
+    Dispatch walks the MRO, not the exact type name. Matching only the leaf name
+    meant every new exception type fell through to `upstream_error` — on a
+    surface that makes no upstream call — so the taxonomy said "the provider
+    broke" when the caller had simply passed a country nobody had verified.
+    Subclasses now inherit their base's class automatically; only genuinely new
+    categories need a line here.
+    """
+    names = {c.__name__ for c in type(exc).__mro__}
+    # A recorded policy refusal is neither malformed input nor a fault: the
+    # caller asked for something the stored data says no to.
+    if "EligibilityRefused" in names:
+        return "policy_refusal"
+    # ValidationError, PrerequisiteCycleError and UnknownPrerequisiteError all
+    # derive from ValueError; all three are caller-input errors.
+    if names & {"ValidationError", "ValueError"}:
         return "validation"
-    if name in {"TimeoutError", "ReadTimeout", "ConnectTimeout"}:
+    if names & {"TimeoutError", "ReadTimeout", "ConnectTimeout"}:
         return "timeout"
-    if name in {"PermissionError", "OSError", "FileNotFoundError", "IsADirectoryError"}:
+    if names & {"PermissionError", "OSError", "FileNotFoundError", "IsADirectoryError"}:
         return "filesystem"
-    if name in {"RuntimeError"} and "auth" in str(exc).lower():
+    if "RuntimeError" in names and "auth" in str(exc).lower():
         return "auth"
-    if name == "RuntimeError":
+    if "RuntimeError" in names:
         return "internal_error"
     return "upstream_error"
 
