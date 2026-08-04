@@ -258,9 +258,13 @@ def update_profile_section(section_heading: str, new_content: str) -> dict[str, 
     Creates the section at end-of-file if it doesn't exist.
     """
     guard_vault_write({"section_heading": section_heading}, new_content)
+    # The whole file is rewritten, so a legacy number in an UNTOUCHED section
+    # would be re-persisted by this guarded path. Remediate it here, the same
+    # way upsert_companion remediates a legacy companion file.
     pp = profile_path()
     if pp is None:
         raise RuntimeError(f"{VAULT_ENV} unset; cannot update profile")
+    _remediated: list[str] = []
     if not pp.exists():
         ensure_dirs()
     post = frontmatter.load(str(pp))
@@ -274,13 +278,24 @@ def update_profile_section(section_heading: str, new_content: str) -> dict[str, 
         new_body = pattern.sub(rf"\1\n{new_content.rstrip()}\n\n", body)
     else:
         new_body = body.rstrip() + f"\n\n## {section_heading}\n\n{new_content.rstrip()}\n"
+    # Remediate any legacy number in a section this call did not touch, and in
+    # the frontmatter. Without this, the one multi-section file in the system is
+    # the one place a pre-existing number survives a guarded write untouched.
+    if audit.contains_labelled_document(new_body):
+        new_body = audit.redact_labelled_documents(new_body)
+        _remediated.append("body")
+    for k in [k for k in list(post.metadata) if audit.is_document_number_key(k)]:
+        post.metadata.pop(k, None)
+        _remediated.append(k)
+
     post.content = new_body
     post.metadata["last_updated"] = time.strftime("%Y-%m-%d")
     with pp.open("w", encoding="utf-8") as f:
         f.write(frontmatter.dumps(post))
         if not new_body.endswith("\n"):
             f.write("\n")
-    return {"path": str(pp), "section": section_heading, "bytes": pp.stat().st_size}
+    return {"path": str(pp), "section": section_heading, "bytes": pp.stat().st_size,
+            "removed_identity_fields": _remediated}
 
 
 # ---------------- companions ----------------

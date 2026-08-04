@@ -110,7 +110,8 @@ _DOC_LABEL_RE = re.compile(
     r"(?i)\b(passports?|pasaportes?|c[ée]dulas?|dni|nit|curp|rfc|ssn|"
     r"social\s+security|national\s+id|tax\s+id|documentos?|"
     r"(?:travel\s+|identity\s+|government\s+)?document|"
-    r"id|identification|identificaci[óo]n|reisepass|passeport)\b"
+    r"id\s+(?:number|no\.?|card)|identification|identificaci[óo]n|"
+    r"reisepass|passeport)\b"
 )
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{3,}")
 
@@ -119,7 +120,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.\-]{3,}")
 #: immediately in front of the number can. When one of these sits closer to the
 #: token than the document label does, the number belongs to the itinerary.
 _ITINERARY_LABEL_RE = re.compile(
-    r"(?i)\b(booking|confirmation|confirm|reference|ref|record\s+locator|pnr|"
+    r"(?i)\b(booking|confirmation|confirm|record\s+locator|pnr|"
     r"flight|ticket|reserva|localizador|orden|order)\b"
 )
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}\S*)?$")

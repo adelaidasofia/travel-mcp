@@ -560,3 +560,60 @@ def test_legacy_number_in_body_is_reported_not_silently_kept(travel_vault):
     assert FAKE_PASSPORT not in path.read_text(encoding="utf-8")
     assert "body" in result["removed_identity_fields"], (
         "reported an all-clear while the number was still on disk")
+
+
+# --------------------------------------------------------------------------
+# 10. Label-collision cover. Both defects below were introduced by the fix
+#     itself: a word that belongs to two vocabularies at once.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "1. Avianca - loyalty ID: 12345678 - tier: Diamond",
+    "Rental company: Hertz - loyalty ID: 55512345",
+    "AAdvantage ID 12345678",
+    "Bonvoy ID: 87654321",
+])
+def test_loyalty_ids_stay_writable(travel_vault, text):
+    """`ID` is not a document label on its own; PROFILE_TEMPLATE ships eight
+    `loyalty ID:` lines and the tool must not refuse its own template."""
+    import audit
+    import profile
+
+    profile.ensure_dirs()
+    profile.update_profile_section("4. Airports & Flights", text)   # must not raise
+    assert "REDACTED" not in audit.sanitize_error(text)
+
+
+@pytest.mark.parametrize("text", [
+    "passport reference number: TT7734512",
+    "Passport ref: YY7734512",
+    "passport reference TT7734512",
+    "cedula reference number 1020123456",
+    "national id reference AB7734512",
+])
+def test_reference_does_not_exempt_a_document_number(travel_vault, text):
+    """"reference" belongs to both vocabularies: "passport reference number" is
+    a standard name for the passport number, so it must not act as an
+    itinerary label and exempt the document's own value."""
+    import profile
+
+    profile.ensure_dirs()
+    with pytest.raises(profile.IdentityDocumentRejected):
+        profile.save_trip("ref-collision", "summary", text)
+
+
+def test_legacy_number_in_an_untouched_profile_section_is_remediated(travel_vault):
+    import profile
+
+    profile.ensure_dirs()
+    pp = profile.profile_path()
+    pp.write_text(
+        "---\ntype: travel_profile\n---\n\n## 1. Identity\n\n"
+        f"Passport number: {FAKE_PASSPORT}\n\n## 4. Airports & Flights\n\nold\n",
+        encoding="utf-8")
+
+    result = profile.update_profile_section("4. Airports & Flights", "Primary airport: BOG")
+
+    assert FAKE_PASSPORT not in pp.read_text(encoding="utf-8")
+    assert "body" in result["removed_identity_fields"]
+    assert "Primary airport: BOG" in pp.read_text(encoding="utf-8")
