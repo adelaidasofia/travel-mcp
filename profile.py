@@ -21,6 +21,8 @@ from typing import Any
 
 import frontmatter
 
+import audit
+
 VAULT_ENV = "TRAVEL_MCP_VAULT_PATH"
 FOLDER_ENV = "TRAVEL_MCP_PROFILE_FOLDER"
 DEFAULT_FOLDER = "🧳 Travel"
@@ -43,9 +45,11 @@ last_updated: {created}
 - Date of birth: [FILL IN]
 - Phone: [FILL IN]
 - Email: [FILL IN]
-- Nationality / passport country: [FILL IN]
-- Passport number: [FILL IN]
-- Passport expiration: [FILL IN]
+- Passports held — NEVER record the document number here. Border eligibility
+  needs the issuing country and the expiry date; nothing in this system reads
+  the number, and a vault file is the wrong place to keep one.
+  - Passport 1 — issuing country: [FILL IN] · expires: [YYYY-MM-DD]
+  - Passport 2 — issuing country: [FILL IN OR NONE] · expires: [YYYY-MM-DD]
 - Known Traveler Number (KTN / TSA PreCheck / Global Entry): [FILL IN]
 - Redress Number: [FILL IN OR NONE]
 
@@ -315,7 +319,35 @@ def read_companion(name: str) -> dict[str, Any]:
             "body": post.content, "path": str(p)}
 
 
+class IdentityDocumentRejected(ValueError):
+    """Raised when a caller tries to persist an identity-document number."""
+
+
+def reject_identity_documents(fields: dict[str, Any]) -> None:
+    """Fail loud before any identity-document number reaches the vault.
+
+    The tool signature is the first line of defence, but a signature can be
+    widened by the next change and nothing would notice. This is the write
+    boundary itself, so it holds regardless of how the caller was spelled.
+    Refuses document NUMBERS only. Date of birth and Known Traveler Number are
+    withheld from the audit log but allowed through to the vault, which is the
+    private store where booking flows legitimately need them.
+    """
+    offending = sorted(
+        k for k, v in fields.items()
+        if v is not None and audit.is_document_number_key(k)
+    )
+    if offending:
+        raise IdentityDocumentRejected(
+            f"refusing to write identity-document field(s) to the vault: "
+            f"{', '.join(offending)}. Border eligibility needs issuing country "
+            f"and expiry date, never the document number. Use "
+            f"passport_country / passport_expiry instead."
+        )
+
+
 def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None) -> dict[str, Any]:
+    reject_identity_documents(fields)
     p = _companion_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     post = frontmatter.load(str(p)) if p.exists() else frontmatter.Post(content=body or "")

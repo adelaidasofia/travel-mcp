@@ -57,10 +57,69 @@ def sanitize_error(text: Any) -> str:
     return cleaned
 
 
+# Field names whose VALUE is identity-document PII whatever its shape.
+#
+# Matched on the KEY, never on the value. A passport number is shape-identical
+# to a flight number (AA1234), a PNR, or a booking reference, so a value regex
+# would redact legitimate itinerary data on every route call while still
+# missing passport formats it did not anticipate. The key is the reliable
+# signal; the value never is.
+# Government document NUMBERS. These have no legitimate home in either sink:
+# nothing in this system reads them, and a stored one is pure liability.
+_DOCUMENT_NUMBER_KEYS: frozenset[str] = frozenset({
+    "passport", "passport_number", "passport_no", "passportnumber",
+    "national_id", "ssn", "tax_id", "id_number",
+})
+
+# The audit set is deliberately WIDER than the vault set. An operational log
+# gets copied, pasted into tickets and read while debugging, so date of birth
+# and Known Traveler Number are withheld there — but both are ordinary booking
+# data that belong in the user's own private vault. Two sinks, two threat
+# models, so two lists; collapsing them would silently delete the ability to
+# store a KTN, which is the whole point of having one.
+_SENSITIVE_KEYS: frozenset[str] = _DOCUMENT_NUMBER_KEYS | frozenset({
+    "ktn", "known_traveler_number", "redress", "redress_number",
+    "date_of_birth", "dob", "birth_date",
+})
+
+_REDACTED = "***REDACTED***"
+
+
+def _normalize_key(key: Any) -> str | None:
+    if not isinstance(key, str):
+        return None
+    return key.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    """True when a dict key must be withheld from the AUDIT LOG."""
+    return _normalize_key(key) in _SENSITIVE_KEYS
+
+
+def is_document_number_key(key: Any) -> bool:
+    """True when a dict key names a government document NUMBER.
+
+    The vault-write boundary uses this narrower test: a document number is
+    refused, while date of birth and KTN are allowed through to the user's
+    private vault where booking flows legitimately need them.
+    """
+    return _normalize_key(key) in _DOCUMENT_NUMBER_KEYS
+
+
 def sanitize_payload(obj: Any) -> Any:
-    """Recursively sanitize a dict/list/str payload for the audit io field."""
+    """Recursively sanitize a dict/list/str payload for the audit io field.
+
+    Two independent passes. Values under an identity-document key are dropped
+    outright; every remaining string is scrubbed for credentials. A None stays
+    None rather than becoming a redaction marker, so "field not supplied" and
+    "field supplied and withheld" stay distinguishable in the audit trail.
+    """
     if isinstance(obj, dict):
-        return {k: sanitize_payload(v) for k, v in obj.items()}
+        return {
+            k: (_REDACTED if _is_sensitive_key(k) and v is not None
+                else sanitize_payload(v))
+            for k, v in obj.items()
+        }
     if isinstance(obj, list):
         return [sanitize_payload(v) for v in obj]
     if isinstance(obj, str):
