@@ -84,7 +84,7 @@ Open `<vault>/🧳 Travel/Profile.md` in Obsidian. Replace every `[FILL IN]` wit
 
 | # | Section | What goes here |
 |---|---|---|
-| 1 | Identity | Legal name, DOB, passport, KTN, Global Entry, Redress |
+| 1 | Identity | Legal name, DOB, passport issuing country + expiry (never the number), KTN, Global Entry, Redress |
 | 2 | Travel style | Priority order (schedule / time / loyalty / comfort / price / points) |
 | 3 | Credit cards & payment strategy | Each card's last-4, best-for category, benefits, points programs + cpp values |
 | 4 | Airports & flights | Primary airport, backup airports, seat / cabin / schedule rules, preferred airlines + tier |
@@ -115,7 +115,7 @@ travel.upsert_companion_profile(
   name="Partner",
   legal_name="Alex Smith",
   date_of_birth="1985-04-12",
-  passport="A12345678",
+  passport_country="United States",
   passport_expiry="2029-06-30",
   ktn="TT12345",
   seat_preference="Aisle",
@@ -125,6 +125,13 @@ travel.upsert_companion_profile(
 ```
 
 The analyzers + trip-prep tools pull companion data when relevant.
+
+There is deliberately no field for a passport number, here or in your own
+profile. Border eligibility needs the issuing country and the expiry date and
+nothing else, so the number is never stored. The tool refuses to write one, and
+if a legacy file already contains one it is stripped on the next write and
+reported back in `removed_identity_fields`. Dual nationals fill the
+`second_passport_country` / `second_passport_expiry` pair.
 
 ## 7. First analyzer call
 
