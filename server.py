@@ -165,9 +165,14 @@ def healthcheck() -> dict[str, Any]:
 def get_travel_profile() -> dict[str, Any]:
     """Return the master traveler profile (frontmatter + body) from 🧳 Travel/Profile.md.
 
-    Profile is the source of truth for: name, DOB, passport, KTN, loyalty IDs,
-    credit cards, cabin rules, schedule rules, hotel chains, hard booking rules.
+    Profile is the source of truth for: name, DOB, passport ISSUING COUNTRY and
+    EXPIRY, KTN, loyalty IDs, credit cards, cabin rules, schedule rules, hotel
+    chains, hard booking rules.
     Edit via Obsidian directly OR via update_travel_profile_section().
+
+    NEVER write a passport, national ID, cédula or SSN NUMBER here. Border
+    eligibility is decided by issuing country and expiry date; the document
+    number is read by nothing in this system, and the write boundary refuses it.
     """
     with audit.timed("get_travel_profile", input_payload={}) as ctx:
         result = profile_mod.read_profile()
@@ -215,8 +220,10 @@ def upsert_companion_profile(
     name: str,
     legal_name: str | None = None,
     date_of_birth: str | None = None,
-    passport: str | None = None,
+    passport_country: str | None = None,
     passport_expiry: str | None = None,
+    second_passport_country: str | None = None,
+    second_passport_expiry: str | None = None,
     ktn: str | None = None,
     seat_preference: str | None = None,
     airline_loyalty: str | None = None,
@@ -228,12 +235,20 @@ def upsert_companion_profile(
     Use for partner, family member, frequent travel buddy. All fields optional —
     pass only what you want to set/change. `body` overwrites the markdown body
     (use sparingly; the frontmatter holds structured fields).
+
+    NEVER pass a passport, national ID or SSN number — this tool does not accept
+    one and the vault write boundary refuses it. Border eligibility is decided by
+    ISSUING COUNTRY and EXPIRY DATE; the document number is read by nothing here.
+    Dual nationals: fill the `second_passport_*` pair so per-border checks can
+    compare both and report which one they used.
     """
     fields = {
         "legal_name": legal_name,
         "date_of_birth": date_of_birth,
-        "passport": passport,
+        "passport_country": passport_country,
         "passport_expiry": passport_expiry,
+        "second_passport_country": second_passport_country,
+        "second_passport_expiry": second_passport_expiry,
         "ktn": ktn,
         "seat_preference": seat_preference,
         "airline_loyalty": airline_loyalty,

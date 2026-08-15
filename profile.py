@@ -21,6 +21,8 @@ from typing import Any
 
 import frontmatter
 
+import audit
+
 VAULT_ENV = "TRAVEL_MCP_VAULT_PATH"
 FOLDER_ENV = "TRAVEL_MCP_PROFILE_FOLDER"
 DEFAULT_FOLDER = "🧳 Travel"
@@ -43,9 +45,11 @@ last_updated: {created}
 - Date of birth: [FILL IN]
 - Phone: [FILL IN]
 - Email: [FILL IN]
-- Nationality / passport country: [FILL IN]
-- Passport number: [FILL IN]
-- Passport expiration: [FILL IN]
+- Passports held — NEVER record the document number here. Border eligibility
+  needs the issuing country and the expiry date; nothing in this system reads
+  the number, and a vault file is the wrong place to keep one.
+  - Passport 1 — issuing country: [FILL IN] · expires: [YYYY-MM-DD]
+  - Passport 2 — issuing country: [FILL IN OR NONE] · expires: [YYYY-MM-DD]
 - Known Traveler Number (KTN / TSA PreCheck / Global Entry): [FILL IN]
 - Redress Number: [FILL IN OR NONE]
 
@@ -253,9 +257,14 @@ def update_profile_section(section_heading: str, new_content: str) -> dict[str, 
     The new_content goes BELOW the heading line. Adjacent sections are preserved.
     Creates the section at end-of-file if it doesn't exist.
     """
+    guard_vault_write({"section_heading": section_heading}, new_content)
+    # The whole file is rewritten, so a legacy number in an UNTOUCHED section
+    # would be re-persisted by this guarded path. Remediate it here, the same
+    # way upsert_companion remediates a legacy companion file.
     pp = profile_path()
     if pp is None:
         raise RuntimeError(f"{VAULT_ENV} unset; cannot update profile")
+    _remediated: list[str] = []
     if not pp.exists():
         ensure_dirs()
     post = frontmatter.load(str(pp))
@@ -269,13 +278,24 @@ def update_profile_section(section_heading: str, new_content: str) -> dict[str, 
         new_body = pattern.sub(rf"\1\n{new_content.rstrip()}\n\n", body)
     else:
         new_body = body.rstrip() + f"\n\n## {section_heading}\n\n{new_content.rstrip()}\n"
+    # Remediate any legacy number in a section this call did not touch, and in
+    # the frontmatter. Without this, the one multi-section file in the system is
+    # the one place a pre-existing number survives a guarded write untouched.
+    if audit.contains_labelled_document(new_body):
+        new_body = audit.redact_labelled_documents(new_body)
+        _remediated.append("body")
+    for k in [k for k in list(post.metadata) if audit.is_document_number_key(k)]:
+        post.metadata.pop(k, None)
+        _remediated.append(k)
+
     post.content = new_body
     post.metadata["last_updated"] = time.strftime("%Y-%m-%d")
     with pp.open("w", encoding="utf-8") as f:
         f.write(frontmatter.dumps(post))
         if not new_body.endswith("\n"):
             f.write("\n")
-    return {"path": str(pp), "section": section_heading, "bytes": pp.stat().st_size}
+    return {"path": str(pp), "section": section_heading, "bytes": pp.stat().st_size,
+            "removed_identity_fields": _remediated}
 
 
 # ---------------- companions ----------------
@@ -315,13 +335,77 @@ def read_companion(name: str) -> dict[str, Any]:
             "body": post.content, "path": str(p)}
 
 
+class IdentityDocumentRejected(ValueError):
+    """Raised when a caller tries to persist an identity-document number."""
+
+
+def guard_vault_write(
+    meta: dict[str, Any] | None = None,
+    *texts: Any,
+) -> None:
+    """Fail loud before any identity-document number reaches the vault.
+
+    Called by EVERY vault write primitive in this module. An earlier version
+    guarded only `upsert_companion` while claiming in its own docstring to be
+    "the write boundary itself" -- it was the boundary of one function out of
+    four, and the other three were the sinks for six modules. A guard is only
+    as wide as its call sites, never as wide as its docstring.
+
+    A number arrives four ways, so the walk is recursive and covers all of them:
+      1. a frontmatter KEY that names a document (`passport`, `cedula`, ...),
+      2. a document number written into a frontmatter VALUE as prose,
+      3. a document number written into free-text BODY content,
+      4. the same, NESTED -- the been-there ledger stores `records: [{...}]`,
+         so a scan of top-level values only leaves it sitting two levels down.
+
+    Identifiers that become FILENAMES (`name`, `slug`, `relpath`) are passed in
+    as text too: slugifying "Passport number: X" produced a file literally
+    called `Passport-number-X.md`, a leak in the directory listing itself.
+
+    Refuses document NUMBERS only. Date of birth and Known Traveler Number are
+    withheld from the audit log but allowed through to the vault, which is the
+    private store where booking flows legitimately need them.
+    """
+    violations = audit.find_document_violations(
+        {"meta": meta or {}, "text": list(texts)}
+    )
+    if violations:
+        raise IdentityDocumentRejected(
+            f"refusing to write an identity-document number to the vault "
+            f"({'; '.join(violations[:4])}). Border eligibility needs issuing "
+            f"country and expiry date, never the document number. Use "
+            f"passport_country / passport_expiry instead."
+        )
+
+
+#: Retained name for the companion path; the guard itself is now module-wide.
+def reject_identity_documents(fields: dict[str, Any]) -> None:
+    guard_vault_write(fields)
+
+
 def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None) -> dict[str, Any]:
+    guard_vault_write(fields, body, name)
     p = _companion_path(name)
     p.parent.mkdir(parents=True, exist_ok=True)
     post = frontmatter.load(str(p)) if p.exists() else frontmatter.Post(content=body or "")
     post.metadata["type"] = "travel_companion"
     post.metadata["name"] = name
     post.metadata.update({k: v for k, v in fields.items() if v is not None})
+    # Remediate, do not merely refuse. A number written by the pre-fix version
+    # (or typed into Obsidian by hand) is read off disk and would be rewritten
+    # verbatim by this guarded path. Raising would leave such a file permanently
+    # unwritable, so strip it here and report what was removed.
+    stripped = [k for k in list(post.metadata)
+                if audit.is_document_number_key(k)]
+    for k in stripped:
+        post.metadata.pop(k, None)
+    # The BODY needs the same treatment. Reporting an empty list while a legacy
+    # number still sits in the prose is worse than reporting nothing: a caller
+    # reading removed_identity_fields gets an affirmative all-clear on a file
+    # that still contains the number.
+    if audit.contains_labelled_document(post.content):
+        post.content = audit.redact_labelled_documents(post.content)
+        stripped.append("body")
     post.metadata["last_updated"] = time.strftime("%Y-%m-%d")
     if body is not None:
         post.content = body
@@ -329,7 +413,8 @@ def upsert_companion(name: str, fields: dict[str, Any], body: str | None = None)
         f.write(frontmatter.dumps(post))
         if not post.content.endswith("\n"):
             f.write("\n")
-    return {"path": str(p), "name": name, "bytes": p.stat().st_size}
+    return {"path": str(p), "name": name, "bytes": p.stat().st_size,
+            "removed_identity_fields": stripped}
 
 
 # ---------------- trip plans ----------------
@@ -343,6 +428,7 @@ def _trip_path(slug: str) -> Path:
 
 def save_trip(slug: str, summary: str, content: str,
               frontmatter_extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    guard_vault_write(frontmatter_extra, content, summary, slug)
     p = _trip_path(slug)
     p.parent.mkdir(parents=True, exist_ok=True)
     post = frontmatter.Post(content=content)
@@ -426,6 +512,7 @@ def read_data_doc(relpath: str) -> dict[str, Any] | None:
 
 
 def write_data_doc(relpath: str, meta: dict[str, Any], body: str) -> dict[str, Any]:
+    guard_vault_write(meta, body, relpath)
     p = _data_doc_path(relpath)
     p.parent.mkdir(parents=True, exist_ok=True)
     post = frontmatter.Post(content=body)
