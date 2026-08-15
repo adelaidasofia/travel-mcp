@@ -72,7 +72,7 @@ A trip is ORDERED SEGMENTS, not prose. These tools are deterministic and offline
 
 - **No real flight search.** This MCP analyzes strategy. For live fares, compose with [`salamentic/google-flights-mcp`](https://github.com/salamentic/google-flights-mcp), [`ravinahp/flights-mcp`](https://github.com/ravinahp/flights-mcp), or Claude in Chrome.
 - **No booking.** Booking requires payment + identity flow; out of scope.
-- **No fabricated prices.** Every numeric estimate is flagged "verify before trusting." The LLM does not have live pricing data and the MCP enforces that discipline.
+- **No fabricated prices.** Every numeric estimate is flagged "verify before trusting." The LLM does not have live pricing data, and the system prompts instruct it to say so on every number. Enforcement stops at the prompt: nothing validates that the model complied.
 
 ## Install
 
