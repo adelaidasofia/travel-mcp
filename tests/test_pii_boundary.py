@@ -72,10 +72,9 @@ def test_passport_never_written_on_the_error_path(travel_vault):
     """The failure path records its own audit line and must scrub identically."""
     import audit
 
-    with pytest.raises(RuntimeError):
-        with audit.timed("upsert_companion_profile",
-                         input_payload={"fields": {"passport": FAKE_PASSPORT}}):
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), audit.timed("upsert_companion_profile",
+                     input_payload={"fields": {"passport": FAKE_PASSPORT}}):
+        raise RuntimeError("boom")
 
     raw = (travel_vault / "audit.jsonl").read_text(encoding="utf-8")
     assert FAKE_PASSPORT not in raw
@@ -149,8 +148,9 @@ def test_audit_still_withholds_dob_and_ktn(travel_vault):
 def test_dual_passport_country_and_expiry_are_preserved(travel_vault):
     """The replacement model must survive both sinks intact, or the fix has
     removed a capability instead of relocating it."""
-    import audit
     import profile
+
+    import audit
 
     fields = {
         "passport_country": "CO",
@@ -238,27 +238,42 @@ LABELLED = f"Passport number: {FAKE_PASSPORT}"
 def _plausible_arg(param: str, annotation: str) -> object:
     """A value shaped well enough to get past input validation."""
     p = param.lower()
-    if "slug" in p:                       return "test-trip"
+    if "slug" in p:
+        return "test-trip"
     # These are date-shaped and previously got "test", so the call died in
     # validators.py and the injection never reached the write boundary.
-    if p in ("window_start", "arrive", "start"):   return "2026-10-01"
-    if p in ("window_end", "depart", "end"):       return "2026-10-05"
-    if "date" in p or "expiry" in p:      return "2026-10-01"
-    if p == "state":                      return "allowed"
-    if p == "status":                     return "planned"
-    if p in ("origin", "destination_iata", "iata"): return "LHR"
-    if "country" in p:                    return "Japan"
-    if "city" in p or "place" in p:       return "Tokyo"
-    if "int" in annotation:               return 1
-    if "float" in annotation:             return 1.0
-    if "bool" in annotation:              return False
-    if "dict" in annotation:              return {}
-    if "list" in annotation:              return []
+    if p in ("window_start", "arrive", "start"):
+        return "2026-10-01"
+    if p in ("window_end", "depart", "end"):
+        return "2026-10-05"
+    if "date" in p or "expiry" in p:
+        return "2026-10-01"
+    if p == "state":
+        return "allowed"
+    if p == "status":
+        return "planned"
+    if p in ("origin", "destination_iata", "iata"):
+        return "LHR"
+    if "country" in p:
+        return "Japan"
+    if "city" in p or "place" in p:
+        return "Tokyo"
+    if "int" in annotation:
+        return 1
+    if "float" in annotation:
+        return 1.0
+    if "bool" in annotation:
+        return False
+    if "dict" in annotation:
+        return {}
+    if "list" in annotation:
+        return []
     return "test"
 
 
 def _collect_tools():
     import inspect
+
     import server
     out = []
     for name in dir(server):
@@ -330,6 +345,7 @@ def test_no_tool_can_land_a_document_number_in_either_sink(travel_vault):
 def test_the_tool_the_model_is_told_to_use_refuses_a_passport(travel_vault):
     """update_travel_profile_section is where the docstring points the model."""
     import profile
+
     import server
 
     profile.ensure_dirs()
@@ -358,8 +374,9 @@ def test_companion_body_arm_is_guarded_not_just_fields(travel_vault):
 ])
 def test_document_key_spellings_are_covered_in_both_boundaries(travel_vault, key):
     """Every spelling a caller could plausibly reach for, incl. LatAm documents."""
-    import audit
     import profile
+
+    import audit
 
     assert audit.sanitize_payload({key: FAKE_PASSPORT})[key] == "***REDACTED***"
     profile.ensure_dirs()
@@ -537,8 +554,9 @@ def test_every_known_disclosure_phrasing_is_refused(travel_vault, text):
 ])
 def test_legitimate_strings_survive_both_sinks(travel_vault, text):
     """Neither refused at the vault nor corrupted in the log."""
-    import audit
     import profile
+
+    import audit
 
     profile.ensure_dirs()
     profile.save_trip("legit", "summary", text)          # must not raise
@@ -576,8 +594,9 @@ def test_legacy_number_in_body_is_reported_not_silently_kept(travel_vault):
 def test_loyalty_ids_stay_writable(travel_vault, text):
     """`ID` is not a document label on its own; PROFILE_TEMPLATE ships eight
     `loyalty ID:` lines and the tool must not refuse its own template."""
-    import audit
     import profile
+
+    import audit
 
     profile.ensure_dirs()
     profile.update_profile_section("4. Airports & Flights", text)   # must not raise
@@ -635,8 +654,9 @@ def test_legacy_number_in_an_untouched_profile_section_is_remediated(travel_vaul
     "passport copy and booking reference ABC123456",
 ])
 def test_reference_after_a_conjunction_is_an_itinerary_value(travel_vault, text):
-    import audit
     import profile
+
+    import audit
 
     profile.ensure_dirs()
     profile.save_trip("ref-ok", "summary", text)          # must not raise
@@ -676,8 +696,9 @@ def test_bare_id_with_an_alphanumeric_token_is_a_document(travel_vault, text):
 def test_bare_id_with_a_pure_number_is_a_loyalty_id(travel_vault, text):
     """A loyalty number is pure digits; a document number written after bare
     `ID` is alphanumeric. Shape is what separates them."""
-    import audit
     import profile
+
+    import audit
 
     profile.ensure_dirs()
     profile.save_trip("id-loyalty", "summary", text)      # must not raise
