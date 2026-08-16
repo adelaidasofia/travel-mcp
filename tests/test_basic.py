@@ -39,7 +39,7 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     # Re-import so module-level constants pick up the new env.
     for mod in list(sys.modules):
-        if mod in {"audit", "profile", "validators", "router", "prompts", "server"}:
+        if mod in {"audit", "profile", "validators", "router", "prompts", "server", "booking"}:
             del sys.modules[mod]
 
 

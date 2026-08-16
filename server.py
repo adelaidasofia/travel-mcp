@@ -41,6 +41,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 import audit
+import booking as booking_mod
 import dwell as dwell_mod
 import eligibility as eligibility_mod
 import itinerary as itinerary_mod
@@ -457,6 +458,31 @@ def channel_comparison(
         system=prompts.CHANNEL_COMPARISON_SYSTEM,
         user=prompts.render_channel_comparison_user(o, d, parsed, cabin_v),
     )
+
+
+@mcp.tool()
+def booking_links(
+    origin: str, destination: str, dates: str, cabin: str | None = None,
+) -> dict[str, Any]:
+    """Where to click for this trip: a search URL per verified booking channel.
+
+    Pairs with `channel_comparison`, which reasons about WHICH channel deserves
+    the booking; this one hands over the link for it.
+
+    Carries no price and reaches no model. Prices belong to a fetched fare and
+    must travel with one, so a link from here can never arrive wearing a number
+    the model made up. Channels whose URL format has not been checked against
+    the live site are withheld with a reason rather than guessed at.
+    """
+    with audit.timed("booking_links", input_payload={
+        "origin": origin, "destination": destination, "dates": dates, "cabin": cabin,
+    }) as ctx:
+        result = booking_mod.booking_links(origin, destination, dates, cabin=cabin)
+        ctx["output"] = {
+            "links": len(result["links"]),
+            "withheld": len(result["withheld"]),
+        }
+        return result
 
 
 @mcp.tool()
