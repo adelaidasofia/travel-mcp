@@ -19,6 +19,10 @@ sys.path.insert(0, str(ROOT))
 TRAVEL_MODULES = (
     "audit", "profile", "validators", "router", "prompts", "server",
     "itinerary", "preferences", "ledger", "dwell", "eligibility", "prereqs",
+    # `booking` binds validators at import time. Reloading validators without
+    # reloading booking leaves two distinct ValidationError classes alive and
+    # `pytest.raises` silently stops matching. It travels with validators.
+    "booking",
 )
 
 
