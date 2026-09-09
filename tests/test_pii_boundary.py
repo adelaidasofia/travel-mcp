@@ -442,7 +442,7 @@ def test_labelled_prose_redacted_but_flight_numbers_survive(travel_vault):
     "Renew passport - fee USD 130-165",
     "national id required, see form DS-11",
     "passport appointment 2026-04-12T09:30",
-    "Passport office room 12345, Bogota",
+    "Passport office room 12345, Springfield",
     "passport expires 2029-04-12",
     "passport must have 6 months validity",
 ])
